@@ -6,14 +6,19 @@ from libc.stdint cimport uint32_t, uint64_t, UINT64_MAX
 from murmurhash.mrmr cimport hash128_x64
 import numpy
 cimport numpy as np
+from spacy.tokens import Doc
+from thinc.api import Model
+from thinc.types import Floats2d
+from tokenizers import Tokenizer
 
-def MinHashEmbedder(n_hashes: int, token_features: int) -> np.ndarray:
+
+def MinHashEmbed(n_hashes: int, token_features: int, vocab: List[str]) -> Model:
     pass
 
 
 def extract_ngrams(piece: str, n: int) -> List[str]:
     if len(piece) < n:
-        return piece
+        return [piece]
 
     ngrams = []
     while len(piece) >= n:
@@ -21,6 +26,20 @@ def extract_ngrams(piece: str, n: int) -> List[str]:
         piece = piece[1:]
 
     return ngrams
+
+def embed_tokens(table: VocabTable, tokenizer: Tokenizer, doc: Doc, n_features: int):
+    tokens = [token.text for token in doc]
+    encoding = tokenizer.encode(tokens, is_pretokenized=True, add_special_tokens=False)
+    bloom = numpy.zeros((len(tokens), n_features), dtype="f")
+    for i in range(len(tokens)):
+        start, end = encoding.word_to_tokens(i)
+        # Safe to cast to int since n_features is smaller than the maximum.
+        hash_indices = (table.lookup(encoding.tokens[start:end]) % n_features).astype("i")
+        bloom[i] = numpy.bincount(hash_indices, minlength=n_features)
+
+    return bloom
+
+
 
 cdef class VocabTable:
     def __init__(self, vocab: List[str], *, uint32_t hash_seed=42, size_t n_hashes=64):
@@ -48,7 +67,7 @@ cdef class VocabTable:
         """Returns a copy of the vocab hashes"""
         return numpy.copy(self.hashes)
 
-cdef void minhash_multiple(list ngrams, uint32_t hash_seed, size_t n_hashes, np.ndarray out):
+cdef void minhash_multiple(list ngrams, uint32_t hash_seed, size_t n_hashes, uint64_t [::1] out):
     cdef size_t i
     cdef char * c_chars
     cdef uint64_t hash
