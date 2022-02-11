@@ -19,11 +19,24 @@ def test_create_vocab_table():
 def test_vocab_table_lookup():
     pieces = ["hello", "world", "##ing"]
     table = VocabTable(pieces, hash_seed=42, n_hashes=3)
+    out = np.zeros(3, dtype="u8")
     np.testing.assert_allclose(
         table.lookup(["hello", "##ing"]),
         [646525935662823063, 4453848894996444099, 1098919852625566271],
     )
+
+    table.lookup(["hello", "##ing"], out=out),
+    np.testing.assert_allclose(
+        out,
+        [646525935662823063, 4453848894996444099, 1098919852625566271],
+    )
+
     np.testing.assert_allclose(
         table.lookup(["world", "##ing"]),
+        [3403186037323527541, 3691063079667146669, 47369931100659919],
+    )
+    table.lookup(["world", "##ing"], out=out),
+    np.testing.assert_allclose(
+        out,
         [3403186037323527541, 3691063079667146669, 47369931100659919],
     )
