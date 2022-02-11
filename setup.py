@@ -73,6 +73,13 @@ def setup_package():
             extra_compile_args=["-std=c++11"],
         ),
         Extension(
+            "spacy_experimental.encoders.minhash_embedder",
+            ["spacy_experimental/encoders/minhash_embedder.pyx"],
+            language="c++",
+            include_dirs=[numpy.get_include()],
+            extra_compile_args=["-std=c++11"],
+        ),
+        Extension(
             "spacy_experimental.char_tokenizer.char_tagger_tokenizer",
             ["spacy_experimental/char_tokenizer/char_tagger_tokenizer.pyx"],
             language="c++",
