@@ -1,6 +1,17 @@
 import numpy as np
+from numpy.testing._private.utils import assert_allclose
+from spacy.vocab import Vocab
+from spacy.tokens import Doc
+import tokenizers
 
-from spacy_experimental.encoders.minhash_embedder import VocabTable
+from spacy_experimental.encoders.minhash_embedder import VocabTable, embed_tokens
+
+
+def sample_doc():
+    words = ["hello", "world", "worldlings"]
+    spaces = [True, False, False]
+    vocab = Vocab()
+    return Doc(vocab, words=words, spaces=spaces)
 
 
 def test_create_vocab_table():
@@ -39,4 +50,28 @@ def test_vocab_table_lookup():
     np.testing.assert_allclose(
         out,
         [3403186037323527541, 3691063079667146669, 47369931100659919],
+    )
+
+
+def test_embeding_tokens():
+    # tokenizer = tokenizers.models.WordPiece(
+    #    {"hello": 0, "world": 1, "##ing": 2, "[UNK]": 3}, unk_token="[UNK]"
+    # )
+    tokenizer = tokenizers.Tokenizer.from_pretrained("bert-base-uncased")
+    vocab = [tokenizer.id_to_token(i) for i in range(tokenizer.get_vocab_size())]
+    table = VocabTable(vocab, hash_seed=42, n_hashes=3)
+    embeds = embed_tokens(table, tokenizer, sample_doc(), n_features=3)
+    assert_allclose(
+        embeds,
+        [[2.0, 0.0, 1.0], [0.0, 2.0, 1.0], [1.0, 1.0, 1.0]],
+    )
+
+    embeds = embed_tokens(table, tokenizer, sample_doc(), n_features=3, nW=1)
+    assert_allclose(
+        embeds,
+        [
+            [0.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 2.0, 1.0],
+            [2.0, 0.0, 1.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+        ],
     )

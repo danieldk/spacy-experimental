@@ -1,8 +1,9 @@
 from typing import List
 
 import numpy as np
+from spacy import tokens
 from spacy.tokens import Doc
-from thinc.api import Model
+from thinc.api import Model, get_ops
 from thinc.types import Floats2d
 from tokenizers import Tokenizer
 
@@ -31,22 +32,36 @@ class VocabTable:
         return self.hashes[indices].min(axis=0, out=out)
 
     @property
+    def n_hashes(self):
+        return self.hashes.shape[1]
+
+    @property
     def vocab_hashes(self):
+
         """Returns a copy of the vocab hashes"""
         return np.copy(self.hashes)
 
 
-def embed_tokens(table: VocabTable, tokenizer: Tokenizer, doc: Doc, n_features: int):
+def embed_tokens(table: VocabTable, tokenizer: Tokenizer, doc: Doc, n_features: int, nW: int = 0):
     tokens = [token.text for token in doc]
     encoding = tokenizer.encode(tokens, is_pretokenized=True, add_special_tokens=False)
-    bloom = np.zeros((len(tokens), n_features), dtype="f")
+    hashes = np.zeros((len(tokens), table.n_hashes), dtype="u8")
     for i in range(len(tokens)):
         start, end = encoding.word_to_tokens(i)
-        # Safe to cast to int since n_features is smaller than the maximum.
-        hash_indices = (table.lookup(encoding.tokens[start:end]) % n_features).astype(
-            "i"
-        )
-        bloom[i] = np.bincount(hash_indices, minlength=n_features)
+        o = table.lookup(encoding.tokens[start:end], out=hashes[i])
+
+
+    # Convert to indices into the counting Bloom filter
+    ops = get_ops("cpu")
+    # Safe to cast to int since n_features is smaller than the maximum.
+    hash_indices = (hashes % n_features).astype("i")
+
+    bloom = np.zeros((len(tokens), n_features), dtype="f")
+    for i in range(len(tokens)):
+        bloom[i] = ops.xp.bincount(hash_indices[i], minlength=n_features)
+
+    if nW > 0:
+        bloom = ops.seq2col(bloom, nW)
 
     return bloom
 
