@@ -1,9 +1,9 @@
 from typing import Callable, List
 
 import numpy as np
-from spacy import tokens
+from spacy import registry, tokens
 from spacy.tokens import Doc
-from thinc.api import Model, get_ops
+from thinc.api import Linear, Model, chain, get_ops, with_array
 from thinc.types import Floats2d, Ints2d
 from tokenizers import Tokenizer
 
@@ -66,6 +66,14 @@ def embed_tokens(
 
     return bloom
 
+@registry.architectures("spacy-experimental.MinHashEmbed.v1")
+def MinHashEmbed(tokenizer_name: str, n_hashes: int, n_features: int, window_size: int, bottleneck: int, width: int, seed: int=0):
+    return chain(
+        MinHashFeatures(tokenizer_name, n_hashes, n_features, window_size),
+        with_array(Linear(nO=bottleneck)),
+        with_array(Linear(nO=width))
+    )
+
 
 def MinHashFeatures(
     tokenizer_name: str, n_hashes: int, n_features: int, window_size: int
@@ -81,7 +89,7 @@ def MinHashFeatures(
         "window_size": window_size,
     }
 
-    return Model("minhash-embed", forward=forward, attrs=attrs)
+    return Model("minhash_features", forward=forward, attrs=attrs)
 
 
 def forward(model: Model[List[Doc], List[Ints2d]], docs: List[Doc], is_train: bool):
@@ -91,7 +99,6 @@ def forward(model: Model[List[Doc], List[Ints2d]], docs: List[Doc], is_train: bo
     nF = model.attrs["n_features"]
 
     embeds = []
-    print(type(docs))
     for doc in docs:
         embeds.append(embed_tokens(table, tokenizer, doc, nF, nW))
 
