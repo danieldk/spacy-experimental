@@ -73,8 +73,8 @@ def setup_package():
             extra_compile_args=["-std=c++11"],
         ),
         Extension(
-            "spacy_experimental.encoders.minhash_embedder",
-            ["spacy_experimental/encoders/minhash_embedder.pyx"],
+            "spacy_experimental.encoders.minhash",
+            ["spacy_experimental/encoders/minhash.pyx"],
             language="c++",
             include_dirs=[numpy.get_include()],
             extra_compile_args=["-std=c++11"],
