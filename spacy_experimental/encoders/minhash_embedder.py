@@ -1,10 +1,10 @@
-from typing import List
+from typing import Callable, List
 
 import numpy as np
 from spacy import tokens
 from spacy.tokens import Doc
 from thinc.api import Model, get_ops
-from thinc.types import Floats2d
+from thinc.types import Floats2d, Ints2d
 from tokenizers import Tokenizer
 
 from .minhash import minhash_multiple
@@ -42,14 +42,15 @@ class VocabTable:
         return np.copy(self.hashes)
 
 
-def embed_tokens(table: VocabTable, tokenizer: Tokenizer, doc: Doc, n_features: int, nW: int = 0):
+def embed_tokens(
+    table: VocabTable, tokenizer: Tokenizer, doc: Doc, n_features: int, nW: int = 0
+):
     tokens = [token.text for token in doc]
     encoding = tokenizer.encode(tokens, is_pretokenized=True, add_special_tokens=False)
     hashes = np.zeros((len(tokens), table.n_hashes), dtype="u8")
     for i in range(len(tokens)):
         start, end = encoding.word_to_tokens(i)
         o = table.lookup(encoding.tokens[start:end], out=hashes[i])
-
 
     # Convert to indices into the counting Bloom filter
     ops = get_ops("cpu")
@@ -66,8 +67,36 @@ def embed_tokens(table: VocabTable, tokenizer: Tokenizer, doc: Doc, n_features: 
     return bloom
 
 
-def MinHashEmbed(n_hashes: int, token_features: int, vocab: List[str]) -> Model:
-    pass
+def MinHashFeatures(
+    tokenizer_name: str, n_hashes: int, n_features: int, window_size: int
+) -> Model:
+    tokenizer = Tokenizer.from_pretrained(tokenizer_name)
+    vocab = [tokenizer.id_to_token(i) for i in range(tokenizer.get_vocab_size())]
+    table = VocabTable(vocab, n_hashes=n_hashes)
+
+    attrs = {
+        "n_features": n_features,
+        "tokenizer": tokenizer,
+        "vocab_table": table,
+        "window_size": window_size,
+    }
+
+    return Model("minhash-embed", forward=forward, attrs=attrs)
+
+
+def forward(model: Model[List[Doc], List[Ints2d]], docs: List[Doc], is_train: bool):
+    tokenizer = model.attrs["tokenizer"]
+    table = model.attrs["vocab_table"]
+    nW = model.attrs["window_size"]
+    nF = model.attrs["n_features"]
+
+    embeds = []
+    print(type(docs))
+    for doc in docs:
+        embeds.append(embed_tokens(table, tokenizer, doc, nF, nW))
+
+    backprop: Callable[[List[Ints2d]], List] = lambda d_features: []
+    return embeds, backprop
 
 
 def extract_ngrams(piece: str, n: int) -> List[str]:
