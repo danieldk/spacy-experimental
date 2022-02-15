@@ -54,7 +54,7 @@ def length_to_mask(
         max_len,
         device=length.device,
         dtype=length.dtype
-    ).expand(len(length), max_len) < length.unsqueeze(1)
+    ).expand(len(length), max_len) > length.unsqueeze(1)
     return mask
 
 
@@ -116,7 +116,7 @@ class TransformerModel(nn.Module):
     ) -> Tensor:
         """
         Args:
-            X: Tensor, batch x len x dim
+            X: Tensor, len x batch x dim
             mask: Tensor, batch x len
         """
         mask = length_to_mask(lengths)
@@ -133,7 +133,7 @@ def PyTorchTransformerEncoder(
     width: int = 768,
     hidden_dim: int = 768,
     n_heads: int = 6,
-    n_layers: int = 6,
+    depth: int = 6,
     dropout: float = 0.2,
     max_len: int = 512
 ) -> Model[List[Floats2d], List[Floats2d]]:
@@ -141,7 +141,7 @@ def PyTorchTransformerEncoder(
         width,
         hidden_dim,
         n_heads,
-        n_layers,
+        depth,
         dropout,
         max_len
     )
