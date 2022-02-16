@@ -11,7 +11,7 @@ from thinc.api import Model, PyTorchWrapper, with_padded, chain
 
 from torch import Tensor
 
-from torch.nn import TransformerEncoder, TransformerEncoderLayer
+from torch.nn import LayerNorm, TransformerEncoder, TransformerEncoderLayer
 
 
 # Same as for RNN, but passes lenghts as input
@@ -121,7 +121,8 @@ class TransformerModel(nn.Module):
         n_heads: int,
         n_layers: int,
         dropout: float,
-        max_len: int
+        max_len: int,
+        layer_norm_eps: float=1e-5
     ):
         super().__init__()
         # Learned absolute position encodings
@@ -134,7 +135,8 @@ class TransformerModel(nn.Module):
             dropout=dropout,
         )
         # Stack of transformer encoder layers
-        self.transformer_encoder = TransformerEncoder(encoder_layers, n_layers)
+        encoder_norm = LayerNorm(input_dim, eps=layer_norm_eps)
+        self.transformer_encoder = TransformerEncoder(encoder_layers, n_layers, encoder_norm)
 
     def forward(
         self,
@@ -162,7 +164,8 @@ def PyTorchTransformerEncoder(
     n_heads: int = 6,
     depth: int = 6,
     dropout: float = 0.2,
-    max_len: int = 512
+    max_len: int = 512,
+    layer_norm: float = 1e-5,
 ) -> Model[List[Floats2d], List[Floats2d]]:
     pytorch_transformer = TransformerModel(
         width,
@@ -170,7 +173,8 @@ def PyTorchTransformerEncoder(
         n_heads,
         depth,
         dropout,
-        max_len
+        max_len,
+        layer_norm
     )
     transformer_encoder = PyTorchWrapper(
         pytorch_transformer,
