@@ -100,7 +100,8 @@ def forward(model: Model[List[Doc], List[Ints2d]], docs: List[Doc], is_train: bo
 
     embeds = []
     for doc in docs:
-        embeds.append(embed_tokens(table, tokenizer, doc, nF, nW))
+        embed = model.ops.asarray2f(embed_tokens(table, tokenizer, doc, nF, nW))
+        embeds.append(embed)
 
     backprop: Callable[[List[Ints2d]], List] = lambda d_features: []
     return embeds, backprop
