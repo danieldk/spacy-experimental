@@ -35,7 +35,7 @@ def convert_transformer_outputs(model: Model, inputs_outputs: Tuple, is_train):
     Xp, Ytorch = inputs_outputs
 
     def convert_for_torch_backward(dYp: Padded) -> ArgsKwargs:
-        dYtorch = xp2torch(dYp.data, requires_grad=True)
+        dYtorch = xp2torch(dYp.data, requires_grad=False)
         return ArgsKwargs(args=(Ytorch,), kwargs={"grad_tensors": dYtorch})
 
     Y = cast(Floats3d, torch2xp(Ytorch))
