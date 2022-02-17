@@ -8,6 +8,7 @@ from thinc.types import Floats2d, Floats3d, Ints1d, Ints2d, Padded, ArgsKwargs
 from thinc.util import xp2torch, torch2xp
 from typing import List, Tuple, cast
 from thinc.api import Model, with_padded, chain
+
 # Use thinc.api >= 8.0.14
 from thinc.layers.pytorchwrapper import PyTorchGradScaler, PyTorchWrapper_v2
 
@@ -45,19 +46,15 @@ def convert_transformer_outputs(model: Model, inputs_outputs: Tuple, is_train):
     return Yp, convert_for_torch_backward
 
 
-def length_to_mask(
-        length: Ints1d
-) -> Ints2d:
+def length_to_mask(length: Ints1d) -> Ints2d:
     """
     length: batch.
     return B x max_len.
     """
     max_len = length.max().item()
-    mask = torch.arange(
-        max_len,
-        device=length.device,
-        dtype=length.dtype
-    ).expand(len(length), max_len) > length.unsqueeze(1)
+    mask = torch.arange(max_len, device=length.device, dtype=length.dtype).expand(
+        len(length), max_len
+    ) > length.unsqueeze(1)
     return mask
 
 
@@ -66,12 +63,8 @@ class AbsPosEnc(nn.Module):
     """
     Learned absolute positional embeddings.
     """
-    def __init__(
-            self,
-            dim: int,
-            dropout: float = 0.1,
-            max_len: int = 512
-    ):
+
+    def __init__(self, dim: int, dropout: float = 0.1, max_len: int = 512):
         super().__init__()
         # Positional Embedding matrix
         self.abs_pos_emb = nn.Parameter(torch.randn(max_len, dim))
@@ -82,7 +75,7 @@ class AbsPosEnc(nn.Module):
         Args:
             x: Tensor,  len x batch x dim
         """
-        pos_emb = self.abs_pos_emb[:x.size(0)]
+        pos_emb = self.abs_pos_emb[: x.size(0)]
         pos_emb = pos_emb.unsqueeze(1).repeat(1, x.size(1), 1)
         x = x + pos_emb
         return self.dropout(x)
@@ -90,12 +83,16 @@ class AbsPosEnc(nn.Module):
 
 # Source: https://pytorch.org/tutorials/beginner/transformer_tutorial.html
 class SinusoidalEncoding(nn.Module):
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000, normalize=True):
+    def __init__(
+        self, d_model: int, dropout: float = 0.1, max_len: int = 5000, normalize=True
+    ):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
         position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
+        )
         pe = torch.zeros(max_len, 1, d_model)
         pe[:, 0, 0::2] = torch.sin(position * div_term)
         pe[:, 0, 1::2] = torch.cos(position * div_term)
@@ -104,18 +101,18 @@ class SinusoidalEncoding(nn.Module):
             l2 = torch.norm(pe, dim=-1)
             pe /= l2.unsqueeze(-1)
 
-        self.register_buffer('pe', pe)
+        self.register_buffer("pe", pe)
 
     def forward(self, x: Tensor) -> Tensor:
         """
         Args:
             x: Tensor, shape [seq_len, batch_size, embedding_dim]
         """
-        x = x + self.pe[:x.size(0)]
+        x = x + self.pe[: x.size(0)]
         return self.dropout(x)
 
-class TransformerModel(nn.Module):
 
+class TransformerModel(nn.Module):
     def __init__(
         self,
         input_dim: int,
@@ -124,7 +121,7 @@ class TransformerModel(nn.Module):
         n_layers: int,
         dropout: float,
         max_len: int,
-        layer_norm_eps: float=1e-5
+        layer_norm_eps: float = 1e-5,
     ):
         super().__init__()
         # Learned absolute position encodings
@@ -138,13 +135,11 @@ class TransformerModel(nn.Module):
         )
         # Stack of transformer encoder layers
         encoder_norm = LayerNorm(input_dim, eps=layer_norm_eps)
-        self.transformer_encoder = TransformerEncoder(encoder_layers, n_layers, encoder_norm)
+        self.transformer_encoder = TransformerEncoder(
+            encoder_layers, n_layers, encoder_norm
+        )
 
-    def forward(
-        self,
-        X: Tensor,
-        lengths: Tensor
-    ) -> Tensor:
+    def forward(self, X: Tensor, lengths: Tensor) -> Tensor:
         """
         Args:
             X: Tensor, len x batch x dim
@@ -152,10 +147,7 @@ class TransformerModel(nn.Module):
         """
         mask = length_to_mask(lengths)
         X = self.pos_embedding(X)
-        output = self.transformer_encoder(
-            X,
-            src_key_padding_mask=mask
-        )
+        output = self.transformer_encoder(X, src_key_padding_mask=mask)
         return output
 
 
@@ -204,12 +196,7 @@ def create_default_model():
     rows = [5000, 2500, 2500, 2500]
     width = 300
     include_static_vectors = False
-    embedder = MultiHashEmbed(
-        width,
-        attrs,
-        rows,
-        include_static_vectors
-    )
+    embedder = MultiHashEmbed(width, attrs, rows, include_static_vectors)
     encoder = PyTorchTransformerEncoder(width=width)
     return chain(embedder, encoder)
 
@@ -218,8 +205,8 @@ if __name__ == "__main__":
     import spacy
 
     nlp = spacy.blank("en")
-    text1 = 'hello i am a doc'
-    text2 = 'i am a lovely teapot man'
+    text1 = "hello i am a doc"
+    text2 = "i am a lovely teapot man"
     docs = [nlp(text1), nlp(text2)]
     transformer_tok2vec = create_default_model()
     transformer_tok2vec.initialize()
