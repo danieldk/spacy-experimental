@@ -54,7 +54,7 @@ def length_to_mask(length: Ints1d) -> Ints2d:
     max_len = length.max().item()
     mask = torch.arange(max_len, device=length.device, dtype=length.dtype).expand(
         len(length), max_len
-    ) > length.unsqueeze(1)
+    ) >= length.unsqueeze(1)
     return mask
 
 
