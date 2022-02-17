@@ -27,7 +27,7 @@ def convert_transformer_inputs(model: Model, Xp: Padded, is_train: bool):
         dX = torch2xp(d_inputs.args[0])
         return Padded(dX, size_at_t, lengths, indices)  # type: ignore
 
-    X = xp2torch(Xp.data, requires_grad=True)
+    X = xp2torch(Xp.data, requires_grad=is_train)
     L = xp2torch(lengths, requires_grad=False)
     output = ArgsKwargs(args=(X, L), kwargs={})
     return output, convert_from_torch_backward
