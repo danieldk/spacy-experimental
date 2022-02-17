@@ -7,7 +7,9 @@ from torch import nn
 from thinc.types import Floats2d, Floats3d, Ints1d, Ints2d, Padded, ArgsKwargs
 from thinc.util import xp2torch, torch2xp
 from typing import List, Tuple, cast
-from thinc.api import Model, PyTorchWrapper, with_padded, chain
+from thinc.api import Model, with_padded, chain
+# Use thinc.api >= 8.0.14
+from thinc.layers.pytorchwrapper import PyTorchGradScaler, PyTorchWrapper_v2
 
 from torch import Tensor
 
@@ -166,6 +168,8 @@ def PyTorchTransformerEncoder(
     dropout: float = 0.2,
     max_len: int = 512,
     layer_norm: float = 1e-5,
+    mixed_precision: bool = False,
+    grad_scaler_config: dict = {},
 ) -> Model[List[Floats2d], List[Floats2d]]:
     pytorch_transformer = TransformerModel(
         width,
@@ -174,12 +178,20 @@ def PyTorchTransformerEncoder(
         depth,
         dropout,
         max_len,
-        layer_norm
+        layer_norm,
     )
-    transformer_encoder = PyTorchWrapper(
+
+    # Enable gradient scaling when mixed precision is enabled and gradient
+    # scaling is not explicitly disabled in the configuration.
+    if "enabled" not in grad_scaler_config:
+        grad_scaler_config["enabled"] = mixed_precision
+
+    transformer_encoder = PyTorchWrapper_v2(
         pytorch_transformer,
         convert_inputs=convert_transformer_inputs,
-        convert_outputs=convert_transformer_outputs
+        convert_outputs=convert_transformer_outputs,
+        mixed_precision=mixed_precision,
+        grad_scaler=PyTorchGradScaler(**grad_scaler_config),
     )
     return with_padded(transformer_encoder)
 
