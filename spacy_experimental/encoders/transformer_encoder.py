@@ -119,13 +119,14 @@ class TransformerModel(nn.Module):
         hidden_dim: int,
         n_heads: int,
         n_layers: int,
+        input_dropout: float,
         dropout: float,
         max_len: int,
         layer_norm_eps: float = 1e-5,
     ):
         super().__init__()
         # Learned absolute position encodings
-        self.pos_embedding = AbsPosEnc(input_dim, dropout)
+        self.pos_embedding = AbsPosEnc(input_dim, input_dropout)
         # Single transformer encoder layer
         encoder_layers = TransformerEncoderLayer(
             d_model=input_dim,
@@ -157,6 +158,7 @@ def PyTorchTransformerEncoder(
     hidden_dim: int = 768,
     n_heads: int = 6,
     depth: int = 6,
+    input_dropout: float = 0.1,
     dropout: float = 0.2,
     max_len: int = 512,
     layer_norm: float = 1e-5,
@@ -168,6 +170,7 @@ def PyTorchTransformerEncoder(
         hidden_dim,
         n_heads,
         depth,
+        input_dropout,
         dropout,
         max_len,
         layer_norm,
