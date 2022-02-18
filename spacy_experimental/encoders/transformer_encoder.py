@@ -13,7 +13,7 @@ from thinc.api import Model, with_padded, chain
 from thinc.layers.pytorchwrapper import PyTorchGradScaler, PyTorchWrapper_v2
 
 from torch import Tensor
-
+import torch.nn.functional as F
 from torch.nn import LayerNorm, TransformerEncoder, TransformerEncoderLayer
 
 
@@ -112,6 +112,65 @@ class SinusoidalEncoding(nn.Module):
         return self.dropout(x)
 
 
+# From https://github.com/majumderb/rezero/blob/master/rezero/transformer/rztx.py
+class ReZeroEncoderLayer(nn.Module):
+    """
+    d_model: the number of expected features in the input (required).
+    nhead: the number of heads in the multiheadattention models (required).
+    dim_feedforward: the dimension of the feedforward network model (default=2048).
+    dropout: the dropout value (default=0.1).
+    activation: the activation function of intermediate layer, relu or gelu (default=relu).
+    """
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1, activation='relu'):
+        super().__init__()
+
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        # Implementation of Feedforward model
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        self.resweight = nn.Parameter(torch.Tensor([0.]))
+
+        if activation == "relu":
+            self.activation = F.relu
+        elif activation == "gelu":
+            self.activation = F.gelu
+
+    def __setstate__(self, state):
+        if 'activation' not in state:
+            state['activation'] = F.relu
+        super().__setstate__(state)
+
+    def forward(self, src, src_mask, src_key_padding_mask=None):
+        r"""Pass the input through the encoder layer.
+        Args:
+            src: the sequence to the encoder layer (required).
+            src_mask: the mask for the src sequence (optional).
+            src_key_padding_mask: the mask for the src keys per batch (optional).
+        Shape:
+            see the docs in PyTroch Transformer class.
+        """
+        # Self attention layer
+        src2 = src
+        src2 = self.self_attn(
+            src2, src2, src2,
+            attn_mask=src_mask,
+            key_padding_mask=src_key_padding_mask
+        )
+        src2 = src2[0]
+        src2 = src2 * self.resweight
+        src = src + self.dropout1(src2)
+
+        # Pointiwse FF Layer
+        src2 = src
+        src2 = self.linear2(self.dropout(self.activation(self.linear1(src2))))
+        src2 = src2 * self.resweight
+        src = src + self.dropout2(src2)
+        return src
+
+
 class TransformerModel(nn.Module):
     def __init__(
         self,
@@ -123,19 +182,32 @@ class TransformerModel(nn.Module):
         dropout: float,
         max_len: int,
         layer_norm_eps: float = 1e-5,
+        rezero: bool = False,
+        use_norm: bool = True
     ):
         super().__init__()
         # Learned absolute position encodings
         self.pos_embedding = AbsPosEnc(input_dim, input_dropout)
         # Single transformer encoder layer
-        encoder_layers = TransformerEncoderLayer(
-            d_model=input_dim,
-            nhead=n_heads,
-            dim_feedforward=hidden_dim,
-            dropout=dropout,
-        )
-        # Stack of transformer encoder layers
-        encoder_norm = LayerNorm(input_dim, eps=layer_norm_eps)
+        if rezero:
+            encoder_layers = ReZeroEncoderLayer(
+                d_model=input_dim,
+                nhead=n_heads,
+                dim_feedforward=hidden_dim,
+                dropout=dropout
+            )
+        else:
+            encoder_layers = TransformerEncoderLayer(
+                d_model=input_dim,
+                nhead=n_heads,
+                dim_feedforward=hidden_dim,
+                dropout=dropout,
+            )
+            # Stack of transformer encoder layers
+        if use_norm:
+            encoder_norm = LayerNorm(input_dim, eps=layer_norm_eps)
+        else:
+            encoder_norm = None
         self.transformer_encoder = TransformerEncoder(
             encoder_layers, n_layers, encoder_norm
         )
@@ -161,7 +233,9 @@ def PyTorchTransformerEncoder(
     input_dropout: float = 0.1,
     dropout: float = 0.2,
     max_len: int = 512,
-    layer_norm: float = 1e-5,
+    layer_norm_eps: float = 1e-5,
+    rezero: bool = False,
+    use_norm: bool = False,
     mixed_precision: bool = False,
     grad_scaler_config: dict = {},
 ) -> Model[List[Floats2d], List[Floats2d]]:
@@ -173,7 +247,9 @@ def PyTorchTransformerEncoder(
         input_dropout,
         dropout,
         max_len,
-        layer_norm,
+        layer_norm_eps,
+        rezero,
+        use_norm
     )
 
     # Enable gradient scaling when mixed precision is enabled and gradient
@@ -200,7 +276,7 @@ def create_default_model():
     width = 300
     include_static_vectors = False
     embedder = MultiHashEmbed(width, attrs, rows, include_static_vectors)
-    encoder = PyTorchTransformerEncoder(width=width)
+    encoder = PyTorchTransformerEncoder(width=width, rezero=True)
     return chain(embedder, encoder)
 
 
