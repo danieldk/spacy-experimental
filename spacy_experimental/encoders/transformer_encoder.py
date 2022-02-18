@@ -1,3 +1,16 @@
+"""
+MIT License
+
+Copyright (c) 2020 Bodhisattwa Majumder
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+"""
+
 import math
 import torch
 
@@ -112,7 +125,10 @@ class SinusoidalEncoding(nn.Module):
         return self.dropout(x)
 
 
-# From https://github.com/majumderb/rezero/blob/master/rezero/transformer/rztx.py
+# From https://github.com/majumderb/rezero/
+# License https://github.com/majumderb/rezero/blob/master/LICENSE
+
+
 class ReZeroEncoderLayer(nn.Module):
     """
     d_model: the number of expected features in the input (required).
