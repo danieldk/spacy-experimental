@@ -1,4 +1,8 @@
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional
+import itertools
+import random
+from itertools import islice
+import numpy
 from pathlib import Path
 from spacy import Language, util
 from spacy.cli import app
@@ -9,6 +13,11 @@ from thinc.util import gpu_is_available
 import time
 from typer import Argument as Arg, Option
 from wasabi import Printer
+
+
+def infinite_shuf(docs: List[Doc]):
+    while True:
+        yield random.choice(docs)
 
 
 @app.command("benchmark")
@@ -43,7 +52,9 @@ def benchmark_cli(
     docs = [eg.predicted for eg in corpus(nlp)]
     n_tokens = count_tokens(docs)
 
-    warmup(nlp, docs, warmup_epochs, batch_size)
+    times, wps = warmup(nlp, docs, warmup_epochs, batch_size)
+    print(f"Mean batch speed: {numpy.mean(wps)}")
+    print(f"Mean batch time: {numpy.mean(times)}")
 
     best = benchmark(nlp, docs, bench_epochs, batch_size)
 
@@ -53,8 +64,26 @@ def benchmark_cli(
 
 
 def annotate(nlp: Language, docs: Iterable[Doc], batch_size: Optional[int]) -> None:
-    for _ in nlp.pipe(docs, batch_size=batch_size):
-        pass
+    docs = nlp.pipe(docs, batch_size=batch_size)
+    wps = []
+    times = []
+    while True:
+        try:
+            doc_start = time.time()
+            batch_docs = list(
+                islice(docs, batch_size if batch_size else nlp.batch_size)
+            )
+            if len(batch_docs) == 0:
+                break
+            elapsed = time.time() - doc_start
+            n_tokens = count_tokens(batch_docs)
+            times.append(elapsed)
+            wps.append(n_tokens / elapsed)
+
+        except StopIteration:
+            break
+
+    return times, wps
 
 
 def benchmark(
@@ -80,10 +109,10 @@ def count_tokens(docs: Iterable[Doc]) -> int:
 
 
 def warmup(
-    nlp: Language, docs: Iterable[Doc], warmup_epochs: int, batch_size: Optional[int]
+    nlp: Language, docs: List[Doc], warmup_epochs: int, batch_size: Optional[int]
 ) -> None:
-    for _ in range(warmup_epochs):
-        annotate(nlp, docs, batch_size)
+    docs = itertools.chain(*[iter(docs) for _ in range(warmup_epochs)])
+    return annotate(nlp, docs, batch_size)
 
 
 # Verbatim copy from spacy.cli._util. Remove after possible
