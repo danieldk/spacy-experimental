@@ -23,18 +23,6 @@ class time_context:
     def __exit__(self, type, value, traceback):
         self.elapsed = time.perf_counter() - self.start
 
-def infinite_shuf_(nlp: Language, docs: List[Doc]):
-    while True:
-        doc = nlp.make_doc(random.choice(docs).text)
-        yield doc
-
-def infinite_shuf(nlp: Language, docs: List[Doc]):
-    idx = 0
-    while True:
-        doc = nlp.make_doc(docs[idx % len(docs)].text)
-        yield doc
-        idx += 1
-
 
 @app.command("benchmark")
 def benchmark_cli(
@@ -45,16 +33,12 @@ def benchmark_cli(
     batch_size: Optional[int] = Option(
         None, "--batch-size", "-b", min=1, help="Override the pipeline batch size"
     ),
-    use_gpu: int = Option(-1, "--gpu-id", "-g", help="GPU ID or -1 for CPU"),
-    min_batches: int = Option(
-        50, "--min-batches", help="Minimum number of batches to benchmark"
+    no_shuffle: int = Option(
+        False, "--no-shuffle", help="Do not shuffle benchmark data"
     ),
-    bench_epochs: int = Option(
-        3,
-        "--iter",
-        "-i",
-        min=1,
-        help="Number of iterations over the data for benchmarking",
+    use_gpu: int = Option(-1, "--gpu-id", "-g", help="GPU ID or -1 for CPU"),
+    n_batches: int = Option(
+        50, "--batches", help="Minimum number of batches to benchmark"
     ),
     warmup_epochs: int = Option(
         3, "--warmup", "-w", min=0, help="Number of iterations over the data for warmup"
@@ -74,8 +58,9 @@ def benchmark_cli(
     print(f"Warming up for {warmup_epochs} epochs...")
     warmup(nlp, docs, warmup_epochs, batch_size)
 
-    print(f"\nBenchmarking {min_batches} batches...")
-    wps = benchmark(nlp, docs, min_batches, batch_size)
+    print()
+    print(f"Benchmarking {n_batches} batches...")
+    wps = benchmark(nlp, docs, n_batches, batch_size, not no_shuffle)
     means = bootstrap(wps)
     print()
     print_mean_with_ci(numpy.mean(wps), means)
@@ -115,10 +100,24 @@ def annotate(nlp: Language, docs: List[Doc], batch_size: Optional[int]) -> List[
     return wps
 
 
-def benchmark(nlp: Language, docs: List[Doc], min_batches: int, batch_size: Optional[int]) -> List[float]:
-    bench_docs = list(islice(infinite_shuf(nlp, docs), min_batches * batch_size))
-    #bench_docs = [nlp.make_doc(random.choice(docs).text) for _ in range(min_batches * batch_size)]
-    print(len(bench_docs))
+def benchmark(
+    nlp: Language,
+    docs: List[Doc],
+    n_batches: int,
+    batch_size: Optional[int],
+    shuffle: bool,
+) -> List[float]:
+    if shuffle:
+        bench_docs = [
+            nlp.make_doc(random.choice(docs).text)
+            for _ in range(n_batches * batch_size)
+        ]
+    else:
+        bench_docs = [
+            nlp.make_doc(docs[i % len(docs).text])
+            for i in range(n_batches * batch_size)
+        ]
+
     return annotate(nlp, bench_docs, batch_size)
 
 
