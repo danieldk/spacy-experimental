@@ -33,7 +33,7 @@ def benchmark_cli(
     batch_size: Optional[int] = Option(
         None, "--batch-size", "-b", min=1, help="Override the pipeline batch size"
     ),
-    no_shuffle: int = Option(
+    no_shuffle: bool = Option(
         False, "--no-shuffle", help="Do not shuffle benchmark data"
     ),
     use_gpu: int = Option(-1, "--gpu-id", "-g", help="GPU ID or -1 for CPU"),
@@ -114,7 +114,7 @@ def benchmark(
         ]
     else:
         bench_docs = [
-            nlp.make_doc(docs[i % len(docs).text])
+            nlp.make_doc(docs[i % len(docs)].text)
             for i in range(n_batches * batch_size)
         ]
 
