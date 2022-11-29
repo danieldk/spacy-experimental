@@ -24,6 +24,29 @@ class time_context:
         self.elapsed = time.perf_counter() - self.start
 
 
+class Quartiles:
+    q1: float
+    q2: float
+    q3: float
+    iqr: float
+
+    def __init__(self, sample: numpy.ndarray) -> None:
+        if len(sample) < 3:
+            raise ValueError(f"Sample length must at least be 3, was: {len(sample)}")
+
+        np_sample = numpy.sort(sample)
+        mid = len(np_sample) // 2
+        self.q2 = float(np_sample[mid])
+
+        lower = np_sample[:mid]
+        upper = np_sample[-mid:]
+
+        self.q1 = numpy.median(lower)
+        self.q3 = numpy.median(upper)
+
+        self.iqr = self.q3 - self.q1
+
+
 @app.command("benchmark")
 def benchmark_cli(
     model: str = Arg(..., help="Model name or path"),
@@ -63,6 +86,7 @@ def benchmark_cli(
     wps = benchmark(nlp, docs, n_batches, batch_size, not no_shuffle)
     means = bootstrap(wps)
     print()
+    print_outliers(wps)
     print_mean_with_ci(numpy.mean(wps), means)
 
 
@@ -72,6 +96,23 @@ def bootstrap(sample, statistic=numpy.mean, iterations=10000):
         v = statistic(numpy.random.choice(sample, len(sample), replace=True))
         statistics.append(float(v))
     return statistics
+
+
+def print_outliers(sample):
+    np_sample = numpy.array(sample)
+    quartiles = Quartiles(np_sample)
+
+    n_outliers = numpy.sum(
+        (np_sample < (quartiles.q1 - 1.5 * quartiles.iqr))
+        | (np_sample > (quartiles.q3 + 1.5 * quartiles.iqr))
+    )
+    n_extreme_outliers = numpy.sum(
+        (np_sample < (quartiles.q1 - 3.0 * quartiles.iqr))
+        | (np_sample > (quartiles.q3 + 3.0 * quartiles.iqr))
+    )
+    print(
+        f"Outliers: {(100 * n_outliers) / len(np_sample):.1f}%, extreme outliers: {(100 * n_extreme_outliers) / len(np_sample)}%"
+    )
 
 
 def print_mean_with_ci(mean, bootstrap_means):
@@ -104,7 +145,7 @@ def benchmark(
     nlp: Language,
     docs: List[Doc],
     n_batches: int,
-    batch_size: Optional[int],
+    batch_size: int,
     shuffle: bool,
 ) -> List[float]:
     if shuffle:
