@@ -1,5 +1,4 @@
 from typing import Iterable, List, Optional
-import itertools
 import random
 from itertools import islice
 import numpy
@@ -11,13 +10,30 @@ from spacy.training import Corpus
 from thinc.api import require_gpu
 from thinc.util import gpu_is_available
 import time
+from tqdm import tqdm
 from typer import Argument as Arg, Option
 from wasabi import Printer
 
 
-def infinite_shuf(docs: List[Doc]):
+class time_context:
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.elapsed = time.perf_counter() - self.start
+
+def infinite_shuf_(nlp: Language, docs: List[Doc]):
     while True:
-        yield random.choice(docs)
+        doc = nlp.make_doc(random.choice(docs).text)
+        yield doc
+
+def infinite_shuf(nlp: Language, docs: List[Doc]):
+    idx = 0
+    while True:
+        doc = nlp.make_doc(docs[idx % len(docs)].text)
+        yield doc
+        idx += 1
 
 
 @app.command("benchmark")
@@ -30,6 +46,9 @@ def benchmark_cli(
         None, "--batch-size", "-b", min=1, help="Override the pipeline batch size"
     ),
     use_gpu: int = Option(-1, "--gpu-id", "-g", help="GPU ID or -1 for CPU"),
+    min_batches: int = Option(
+        50, "--min-batches", help="Minimum number of batches to benchmark"
+    ),
     bench_epochs: int = Option(
         3,
         "--iter",
@@ -48,70 +67,69 @@ def benchmark_cli(
     setup_gpu(use_gpu=use_gpu, silent=False)
 
     nlp = util.load_model(model)
+    batch_size = batch_size if batch_size is not None else nlp.batch_size
     corpus = Corpus(data_path)
     docs = [eg.predicted for eg in corpus(nlp)]
-    n_tokens = count_tokens(docs)
 
-    times, wps = warmup(nlp, docs, warmup_epochs, batch_size)
-    print(f"Mean batch speed: {numpy.mean(wps)}")
-    print(f"Mean batch time: {numpy.mean(times)}")
+    print(f"Warming up for {warmup_epochs} epochs...")
+    warmup(nlp, docs, warmup_epochs, batch_size)
 
-    best = benchmark(nlp, docs, bench_epochs, batch_size)
-
-    print(
-        "Best of %d runs: %.3fs %.0f, words/s" % (bench_epochs, best, n_tokens / best)
-    )
+    print(f"\nBenchmarking {min_batches} batches...")
+    wps = benchmark(nlp, docs, min_batches, batch_size)
+    means = bootstrap(wps)
+    print()
+    print_mean_with_ci(numpy.mean(wps), means)
 
 
-def annotate(nlp: Language, docs: Iterable[Doc], batch_size: Optional[int]) -> None:
-    docs = nlp.pipe(docs, batch_size=batch_size)
+def bootstrap(sample, statistic=numpy.mean, iterations=10000):
+    statistics = []
+    for _ in range(iterations):
+        v = statistic(numpy.random.choice(sample, len(sample), replace=True))
+        statistics.append(float(v))
+    return statistics
+
+
+def print_mean_with_ci(mean, bootstrap_means):
+    bootstrap_means.sort()
+
+    # 95% confidence interval
+    low = bootstrap_means[int(len(bootstrap_means) * 0.025)]
+    high = bootstrap_means[int(len(bootstrap_means) * 0.975)]
+
+    print(f"Mean: {mean:.1f} WPS (95% CI: {low-mean:.1f} +{high-mean:.1f})")
+
+
+def annotate(nlp: Language, docs: List[Doc], batch_size: Optional[int]) -> List[float]:
+    docs = nlp.pipe(tqdm(docs, unit="doc"), batch_size=batch_size)
     wps = []
-    times = []
     while True:
-        try:
-            doc_start = time.time()
+        with time_context() as elapsed:
             batch_docs = list(
                 islice(docs, batch_size if batch_size else nlp.batch_size)
             )
-            if len(batch_docs) == 0:
-                break
-            elapsed = time.time() - doc_start
-            n_tokens = count_tokens(batch_docs)
-            times.append(elapsed)
-            wps.append(n_tokens / elapsed)
-
-        except StopIteration:
+        if len(batch_docs) == 0:
             break
+        n_tokens = count_tokens(batch_docs)
+        wps.append(n_tokens / elapsed.elapsed)
 
-    return times, wps
+    return wps
 
 
-def benchmark(
-    nlp: Language, docs: Iterable[Doc], bench_epochs: int, batch_size: Optional[int]
-) -> None:
-    best = float("inf")
-    for _ in range(bench_epochs):
-        start = time.time()
-        annotate(nlp, docs, batch_size)
-        end = time.time()
-        run = end - start
-        if run < best:
-            best = run
-    return best
+def benchmark(nlp: Language, docs: List[Doc], min_batches: int, batch_size: Optional[int]) -> List[float]:
+    bench_docs = list(islice(infinite_shuf(nlp, docs), min_batches * batch_size))
+    #bench_docs = [nlp.make_doc(random.choice(docs).text) for _ in range(min_batches * batch_size)]
+    print(len(bench_docs))
+    return annotate(nlp, bench_docs, batch_size)
 
 
 def count_tokens(docs: Iterable[Doc]) -> int:
-    count = 0
-    for doc in docs:
-        for _ in doc:
-            count += 1
-    return count
+    return sum(len(doc) for doc in docs)
 
 
 def warmup(
     nlp: Language, docs: List[Doc], warmup_epochs: int, batch_size: Optional[int]
-) -> None:
-    docs = itertools.chain(*[iter(docs) for _ in range(warmup_epochs)])
+) -> List[float]:
+    docs = warmup_epochs * docs
     return annotate(nlp, docs, batch_size)
 
 
