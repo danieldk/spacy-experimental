@@ -15,28 +15,6 @@ from typer import Argument as Arg, Option
 from wasabi import Printer
 
 
-class time_context:
-    def __enter__(self):
-        self.start = time.perf_counter()
-        return self
-
-    def __exit__(self, type, value, traceback):
-        self.elapsed = time.perf_counter() - self.start
-
-
-class Quartiles:
-    q1: float
-    q2: float
-    q3: float
-    iqr: float
-
-    def __init__(self, sample: numpy.ndarray) -> None:
-        self.q1 = numpy.quantile(sample, 0.25)
-        self.q2 = numpy.quantile(sample, 0.5)
-        self.q3 = numpy.quantile(sample, 0.75)
-        self.iqr = self.q3 - self.q1
-
-
 @app.command("benchmark")
 def benchmark_cli(
     model: str = Arg(..., help="Model name or path"),
@@ -74,47 +52,43 @@ def benchmark_cli(
     print()
     print(f"Benchmarking {n_batches} batches...")
     wps = benchmark(nlp, docs, n_batches, batch_size, not no_shuffle)
-    means = bootstrap(wps)
+
     print()
     print_outliers(wps)
-    print_mean_with_ci(numpy.mean(wps), means)
+    print_mean_with_ci(wps)
 
 
-def bootstrap(sample, statistic=numpy.mean, iterations=10000):
-    return [
-        float(statistic(numpy.random.choice(sample, len(sample), replace=True)))
-        for _ in range(iterations)
-    ]
+# Lowercased, behaves as a context manager function.
+class time_context:
+    """Register the running time of a context."""
+
+    def __enter__(self):
+        self.start = time.perf_counter()
+        return self
+
+    def __exit__(self, type, value, traceback):
+        self.elapsed = time.perf_counter() - self.start
 
 
-def print_outliers(sample):
-    np_sample = numpy.array(sample)
-    quartiles = Quartiles(np_sample)
+class Quartiles:
+    """Calculate the q1, q2, q3 quartiles and the inter-quartile range (iqr)
+    of a sample."""
 
-    n_outliers = numpy.sum(
-        (np_sample < (quartiles.q1 - 1.5 * quartiles.iqr))
-        | (np_sample > (quartiles.q3 + 1.5 * quartiles.iqr))
-    )
-    n_extreme_outliers = numpy.sum(
-        (np_sample < (quartiles.q1 - 3.0 * quartiles.iqr))
-        | (np_sample > (quartiles.q3 + 3.0 * quartiles.iqr))
-    )
-    print(
-        f"Outliers: {(100 * n_outliers) / len(np_sample):.1f}%, extreme outliers: {(100 * n_extreme_outliers) / len(np_sample)}%"
-    )
+    q1: float
+    q2: float
+    q3: float
+    iqr: float
 
-
-def print_mean_with_ci(mean, bootstrap_means):
-    bootstrap_means.sort()
-
-    # 95% confidence interval
-    low = bootstrap_means[int(len(bootstrap_means) * 0.025)]
-    high = bootstrap_means[int(len(bootstrap_means) * 0.975)]
-
-    print(f"Mean: {mean:.1f} WPS (95% CI: {low-mean:.1f} +{high-mean:.1f})")
+    def __init__(self, sample: numpy.ndarray) -> None:
+        self.q1 = numpy.quantile(sample, 0.25)
+        self.q2 = numpy.quantile(sample, 0.5)
+        self.q3 = numpy.quantile(sample, 0.75)
+        self.iqr = self.q3 - self.q1
 
 
-def annotate(nlp: Language, docs: List[Doc], batch_size: Optional[int]) -> List[float]:
+def annotate(
+    nlp: Language, docs: List[Doc], batch_size: Optional[int]
+) -> numpy.ndarray:
     docs = nlp.pipe(tqdm(docs, unit="doc"), batch_size=batch_size)
     wps = []
     while True:
@@ -127,7 +101,7 @@ def annotate(nlp: Language, docs: List[Doc], batch_size: Optional[int]) -> List[
         n_tokens = count_tokens(batch_docs)
         wps.append(n_tokens / elapsed.elapsed)
 
-    return wps
+    return numpy.array(wps)
 
 
 def benchmark(
@@ -136,7 +110,7 @@ def benchmark(
     n_batches: int,
     batch_size: int,
     shuffle: bool,
-) -> List[float]:
+) -> numpy.ndarray:
     if shuffle:
         bench_docs = [
             nlp.make_doc(random.choice(docs).text)
@@ -151,13 +125,52 @@ def benchmark(
     return annotate(nlp, bench_docs, batch_size)
 
 
+def bootstrap(x, statistic=numpy.mean, iterations=10000) -> numpy.ndarray:
+    """Apply a statistic to repeated random samples of an array."""
+    return numpy.fromiter(
+        (
+            statistic(numpy.random.choice(x, len(x), replace=True))
+            for _ in range(iterations)
+        ),
+        numpy.float64,
+    )
+
+
 def count_tokens(docs: Iterable[Doc]) -> int:
     return sum(len(doc) for doc in docs)
 
 
+def print_mean_with_ci(sample: numpy.ndarray):
+    mean = numpy.mean(sample)
+    bootstrap_means = bootstrap(sample)
+    bootstrap_means.sort()
+
+    # 95% confidence interval
+    low = bootstrap_means[int(len(bootstrap_means) * 0.025)]
+    high = bootstrap_means[int(len(bootstrap_means) * 0.975)]
+
+    print(f"Mean: {mean:.1f} WPS (95% CI: {low-mean:.1f} +{high-mean:.1f})")
+
+
+def print_outliers(sample: numpy.ndarray):
+    quartiles = Quartiles(sample)
+
+    n_outliers = numpy.sum(
+        (sample < (quartiles.q1 - 1.5 * quartiles.iqr))
+        | (sample > (quartiles.q3 + 1.5 * quartiles.iqr))
+    )
+    n_extreme_outliers = numpy.sum(
+        (sample < (quartiles.q1 - 3.0 * quartiles.iqr))
+        | (sample > (quartiles.q3 + 3.0 * quartiles.iqr))
+    )
+    print(
+        f"Outliers: {(100 * n_outliers) / len(sample):.1f}%, extreme outliers: {(100 * n_extreme_outliers) / len(sample)}%"
+    )
+
+
 def warmup(
     nlp: Language, docs: List[Doc], warmup_epochs: int, batch_size: Optional[int]
-) -> List[float]:
+) -> numpy.ndarray:
     docs = warmup_epochs * docs
     return annotate(nlp, docs, batch_size)
 
