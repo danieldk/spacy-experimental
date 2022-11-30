@@ -31,19 +31,9 @@ class Quartiles:
     iqr: float
 
     def __init__(self, sample: numpy.ndarray) -> None:
-        if len(sample) < 3:
-            raise ValueError(f"Sample length must at least be 3, was: {len(sample)}")
-
-        np_sample = numpy.sort(sample)
-        mid = len(np_sample) // 2
-        self.q2 = float(np_sample[mid])
-
-        lower = np_sample[:mid]
-        upper = np_sample[-mid:]
-
-        self.q1 = numpy.median(lower)
-        self.q3 = numpy.median(upper)
-
+        self.q1 = numpy.quantile(sample, 0.25)
+        self.q2 = numpy.quantile(sample, 0.5)
+        self.q3 = numpy.quantile(sample, 0.75)
         self.iqr = self.q3 - self.q1
 
 
@@ -91,11 +81,10 @@ def benchmark_cli(
 
 
 def bootstrap(sample, statistic=numpy.mean, iterations=10000):
-    statistics = []
-    for _ in range(iterations):
-        v = statistic(numpy.random.choice(sample, len(sample), replace=True))
-        statistics.append(float(v))
-    return statistics
+    return [
+        float(statistic(numpy.random.choice(sample, len(sample), replace=True)))
+        for _ in range(iterations)
+    ]
 
 
 def print_outliers(sample):
