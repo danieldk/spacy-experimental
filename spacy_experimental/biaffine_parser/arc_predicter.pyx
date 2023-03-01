@@ -94,10 +94,10 @@ class ArcPredicter(TrainablePipe):
             return d_scores, loss
 
         # We want to compute all the losses at once to avoid too many kernel runs.
-        scores_flat = self.model.ops.flatten(scores)
+        #scores_flat = self.model.ops.flatten(scores)
 
-        target = np.zeros(scores_flat.shape, dtype=scores_flat.dtype)
-        mask = np.zeros(scores_flat.shape[0], dtype=scores_flat.dtype)
+        target = np.zeros(scores.shape, dtype=scores.dtype)
+        mask = np.zeros(scores.shape, dtype=scores.dtype)
 
         offset = 0
         for eg in examples:
@@ -111,21 +111,21 @@ class ArcPredicter(TrainablePipe):
                         # lies within the sentence boundaries.
                         if sent_start <= gold_head < sent_start + lengths[0]:
                             gold_head_idx = gold_head - sent_start
-                            target[offset, gold_head_idx] = 1.0
-                            mask[offset] = 1
-                    offset += 1
+                            target[offset + gold_head_idx] = 1.0
+                            mask[offset:offset+lengths[0]] = 1
+                    offset += lengths[0]
 
                 sent_start += lengths[0]
                 lengths = lengths[1:]
 
         assert offset == target.shape[0]
 
-        target = self.model.ops.asarray2f(target)
-        mask = self.model.ops.asarray2f(np.expand_dims(mask, -1))
+        target = self.model.ops.asarray1f(target)
+        mask = self.model.ops.asarray1f(mask)
 
-        d_scores, loss = loss_func(scores_flat, target, mask)
+        d_scores, loss = loss_func(scores, target, mask)
 
-        return float(loss), self.model.ops.unflatten(d_scores, [s.shape[0] for s in scores])
+        return float(loss), d_scores
 
     def initialize(
         self, get_examples: Callable[[], Iterable[Example]], *, nlp: Language = None
@@ -169,6 +169,7 @@ class ArcPredicter(TrainablePipe):
             lengths = split_lazily(docs, ops=self.model.ops, max_length=self.max_length, senter=self.senter, is_train=False)
         else:
             lengths = sents2lens(docs, ops=self.model.ops)
+
         scores = self.model.predict((docs, lengths))
 
         lengths = to_numpy(lengths)
@@ -176,17 +177,17 @@ class ArcPredicter(TrainablePipe):
 
         heads = []
         for doc in docs:
-            sent_offset = 0
+            split_offset = 0
             doc_heads = []
-            while sent_offset != len(doc):
-                sent_heads = mst_decode(scores[0])
-                #sent_heads = mst_decode(scores[:lengths[0], :lengths[0]])
-                sent_heads = [head - i for (i, head) in enumerate(sent_heads)]
-                doc_heads.extend(sent_heads)
+            while split_offset != len(doc):
+                split_len = lengths[0]
+                split_scores = scores[:split_len*split_len].reshape(split_len, split_len)
+                split_heads = mst_decode(split_scores)
+                split_heads = [head - i for (i, head) in enumerate(split_heads)]
+                doc_heads.extend(split_heads)
 
-                sent_offset += lengths[0]
-                scores = scores[1:]
-                #scores = scores[lengths[0]:]
+                split_offset += lengths[0]
+                scores = scores[split_len*split_len:]
                 lengths = lengths[1:]
 
             heads.append(doc_heads)
