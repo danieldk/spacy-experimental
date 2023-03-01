@@ -2,6 +2,7 @@ from typing import List, Optional, Tuple, cast
 
 from spacy import registry
 from spacy.tokens.doc import Doc
+from spacy.training.batchers import minibatch_by_padded_size
 from thinc.api import Model, chain, get_width, list2array, torch2xp
 from thinc.api import with_getitem, xp2torch
 from thinc.shims.pytorch_grad_scaler import PyTorchGradScaler
@@ -53,12 +54,11 @@ def build_pairwise_bilinear(
 
     model: Model[Tuple[List[Doc], Ints1d], Floats2d] = chain(
         cast(
-            Model[Tuple[List[Doc], Ints1d], Tuple[Floats2d, Ints1d]],
-            with_getitem(
-                0, chain(tok2vec, cast(Model[List[Floats2d], Floats2d], list2array()))
-            ),
+            Model[Tuple[List[Doc], Ints1d], Tuple[List[Floats2d], Ints1d]],
+            with_getitem(0, tok2vec),
         ),
-        pairwise_bilinear,
+        ## TODO: do not hardcode max items
+        with_padded_max_items(pairwise_bilinear, 4096),
     )
     model.set_ref("pairwise_bilinear", pairwise_bilinear)
 
@@ -107,20 +107,14 @@ def pairwise_bilinear_forward(model: Model, X, is_train: bool):
 def convert_inputs(
     model: Model, X_lenghts: Tuple[Floats2d, Ints1d], is_train: bool = False
 ):
-    flatten = model.ops.flatten
-    unflatten = model.ops.unflatten
-    pad = model.ops.pad
-    unpad = model.ops.unpad
-
     X, L = X_lenghts
 
-    # FIXME: Does with_padded work now?
-    Xt = xp2torch(pad(unflatten(X, L)), requires_grad=is_train)
+    Xt = xp2torch(X, requires_grad=is_train)
     Lt = xp2torch(L)
 
-    def convert_from_torch_backward(d_inputs: ArgsKwargs) -> Tuple[Floats2d, Ints1d]:
+    def convert_from_torch_backward(d_inputs: ArgsKwargs) -> Tuple[Floats3d, Ints1d]:
         dX = cast(Floats3d, torch2xp(d_inputs.args[0]))
-        return cast(Floats2d, flatten(unpad(dX, list(L)))), L
+        return dX, L
 
     output = ArgsKwargs(args=(Xt, Lt), kwargs={})
 
@@ -136,13 +130,94 @@ def convert_outputs(model, inputs_outputs, is_train):
     (_, lengths), Y_t = inputs_outputs
 
     def convert_for_torch_backward(dY: Tuple[Floats2d, Floats3d]) -> ArgsKwargs:
-        dY_t = xp2torch(pad(unflatten(dY, lengths)))
+        dY_t = xp2torch(dY)
         return ArgsKwargs(
             args=([Y_t],),
             kwargs={"grad_tensors": [dY_t]},
         )
 
     Y = cast(Floats4d, torch2xp(Y_t))
-    Y = flatten(unpad(Y, lengths))
 
     return Y, convert_for_torch_backward
+
+
+def with_padded_max_items(inner: Model, max_items: int) -> Model:
+    return Model(
+        "with_padded_max_items",
+        with_padded_max_items_forward,
+        init=with_padded_max_items_init,
+        attrs={"max_items": max_items},
+        layers=[inner],
+    )
+
+
+def with_padded_max_items_init(model: Model, X=None, Y=None) -> None:
+    # TODO: pass through X
+    model.layers[0].initialize(Y=Y)
+
+
+def with_padded_max_items_forward(
+    model: Model, X_lens: Tuple[List[Floats2d], Ints1d], is_train: bool
+):
+    inner = model.layers[0]
+    max_items: int = model.attrs["max_items"]
+
+    X, lens = X_lens
+
+    # Extact all splits with offsets
+    splits = []
+    split_offset = 0
+    for doc_id, X_doc in enumerate(X):
+        doc_offset = 0
+        while X_doc.size:
+            splits.append((split_offset, X_doc[: lens[0]], doc_id, doc_offset))
+            split_offset += 1
+            doc_offset += lens[0]
+            X_doc = X_doc[lens[0] :]
+            lens = lens[1:]
+
+    # Sort by split length
+    splits.sort(key=lambda i: i[1].shape[0])
+
+    backprops = []
+    Y: List[Optional[Floats2d]] = [None] * len(splits)
+    for batch in minibatch_by_padded_size(
+        splits, max_items, get_length=lambda i: i[1].shape[0]
+    ):
+        X_batch = [split[1] for split in batch]
+        lens_batch = [X_split.shape[0] for X_split in X_batch]
+        offsets_batch = [split[0] for split in batch]
+
+        X_padded = model.ops.pad(X_batch)
+        Y_padded, backprop = inner((X_padded, model.ops.asarray1i(lens_batch)), is_train)
+        backprops.append(backprop)
+        Y_batch = model.ops.unpad(Y_padded, lens_batch)
+
+        # Place in outputs.
+        for offset, Y_split in zip(offsets_batch, Y_batch):
+            Y[offset] = Y_split
+
+    def backprop(dY):
+        nonlocal backprops
+
+        dX_docs = [model.ops.alloc2f(X_doc.shape[0], X_doc.shape[1], zeros=False) for X_doc in X]
+
+        for batch in minibatch_by_padded_size(
+            splits, max_items, get_length=lambda i: i[1].shape[0]
+        ):
+            lens_batch = [split[1].shape[0] for split in X_batch]
+            dY_batch = [dY[split[0]] for split in batch]
+            dY_padded = model.ops.pad(dY_batch)
+            dX_padded, L = backprops[0](dY_padded)
+            dX = model.ops.unpad(dX_padded, L)
+
+            for split, dX_split in zip(batch, dX):
+                length = dX_split.shape[0]
+                dX_docs[split[2]][split[3]: split[3] + length] = dX_split
+
+
+            # TODO: fill
+
+        return dX_docs, lens
+
+    return Y, backprop

@@ -1,6 +1,7 @@
 # cython: infer_types=True, profile=True, binding=True
 
 from itertools import islice
+from collections import deque
 import numpy as np
 from typing import Callable, Dict, Iterable, List, Optional
 import spacy
@@ -92,8 +93,11 @@ class ArcPredicter(TrainablePipe):
             loss = (d_scores ** 2).sum()
             return d_scores, loss
 
-        target = np.zeros(scores.shape, dtype=scores.dtype)
-        mask = np.zeros(scores.shape[0], dtype=scores.dtype)
+        # We want to compute all the losses at once to avoid too many kernel runs.
+        scores_flat = self.model.ops.flatten(scores)
+
+        target = np.zeros(scores_flat.shape, dtype=scores_flat.dtype)
+        mask = np.zeros(scores_flat.shape[0], dtype=scores_flat.dtype)
 
         offset = 0
         for eg in examples:
@@ -119,9 +123,9 @@ class ArcPredicter(TrainablePipe):
         target = self.model.ops.asarray2f(target)
         mask = self.model.ops.asarray2f(np.expand_dims(mask, -1))
 
-        d_scores, loss = loss_func(scores, target, mask)
+        d_scores, loss = loss_func(scores_flat, target, mask)
 
-        return float(loss), d_scores
+        return float(loss), self.model.ops.unflatten(d_scores, [s.shape[0] for s in scores])
 
     def initialize(
         self, get_examples: Callable[[], Iterable[Example]], *, nlp: Language = None
@@ -175,12 +179,14 @@ class ArcPredicter(TrainablePipe):
             sent_offset = 0
             doc_heads = []
             while sent_offset != len(doc):
-                sent_heads = mst_decode(scores[:lengths[0], :lengths[0]])
+                sent_heads = mst_decode(scores[0])
+                #sent_heads = mst_decode(scores[:lengths[0], :lengths[0]])
                 sent_heads = [head - i for (i, head) in enumerate(sent_heads)]
                 doc_heads.extend(sent_heads)
 
                 sent_offset += lengths[0]
-                scores = scores[lengths[0]:]
+                scores = scores[1:]
+                #scores = scores[lengths[0]:]
                 lengths = lengths[1:]
 
             heads.append(doc_heads)
@@ -234,6 +240,12 @@ class ArcPredicter(TrainablePipe):
         if sgd is not None:
             self.finish_update(sgd)
         losses[self.name] += loss
+
+        # Hmpf, this is horrible, just for the experiments. I promise...
+        cdef Token token
+        for eg in examples:
+            for token in eg.predicted:
+                token.c.sent_start = 0
 
         return losses
 
@@ -326,13 +338,13 @@ def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: Sentence
 
     return ops.asarray1i(lens)
 
-def split_recursive(scores, ops, max_length, lengths):
-    if len(scores) < max_length:
-        lengths.append(len(scores))
-    else:
-        # Find the best splitting point. Exclude the first token, because it
-        # wouldn't split the current partition (leading to infinite recursion).
-        start = ops.xp.argmax(scores[1:]) + 1
-
-        split_recursive(scores[:start], ops, max_length, lengths)
-        split_recursive(scores[start:], ops, max_length, lengths)
+def split_recursive(scores: Floats2d, ops: Ops, max_length: int, lengths: List[int]):
+    q = deque([scores])
+    while q:
+        scores = q.popleft()
+        if len(scores) < max_length:
+            lengths.append(len(scores))
+        else:
+            start = ops.xp.argmax(scores[1:]) + 1
+            q.appendleft(scores[start:])
+            q.appendleft(scores[:start])
