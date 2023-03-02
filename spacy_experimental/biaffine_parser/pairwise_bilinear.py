@@ -26,6 +26,7 @@ def build_pairwise_bilinear(
     *,
     dropout: float = 0.1,
     hidden_width: int = 128,
+    max_items: int = 4096,
     mixed_precision: bool = False,
     grad_scaler: Optional[PyTorchGradScaler] = None
 ) -> Model[Tuple[List[Doc], Ints1d], Floats2d]:
@@ -59,7 +60,7 @@ def build_pairwise_bilinear(
             with_getitem(0, tok2vec),
         ),
         ## TODO: do not hardcode max items
-        with_padded_max_items(pairwise_bilinear, 4096),
+        with_padded_max_items(pairwise_bilinear, max_items),
     )
     model.set_ref("pairwise_bilinear", pairwise_bilinear)
 
@@ -164,34 +165,41 @@ def with_padded_max_items_forward(
     max_items: int = model.attrs["max_items"]
 
     X, lens = X_lens
-
     lens = to_numpy(lens)
 
-    # Extact all splits with offsets
     splits = []
     split_offset = 0
     for doc_id, X_doc in enumerate(X):
         doc_offset = 0
-        while X_doc.size:
-            splits.append(Split(doc_id=doc_id, doc_offset=doc_offset, split_offset=split_offset, array=X_doc[:lens[split_offset]]))
-            doc_offset += int(lens[split_offset])
-            X_doc = X_doc[lens[split_offset] :]
+        doc_len = X_doc.shape[0]
+        while doc_offset < doc_len:
+            split_len = int(lens[split_offset])
+            splits.append(
+                Split(
+                    doc_id=doc_id,
+                    doc_offset=doc_offset,
+                    split_offset=split_offset,
+                    array=X_doc[doc_offset : doc_offset + split_len],
+                )
+            )
+            doc_offset += split_len
             split_offset += 1
+        assert doc_offset == doc_len
 
     # Sort by split length
     splits.sort(key=lambda i: i.array.shape[0])
 
     backprops = []
     Y: List[Optional[Floats2d]] = [None] * len(splits)
-    for batch in minibatch_by_padded_size(
-        splits, max_items
-    ):
+    for batch in minibatch_by_padded_size(splits, max_items):
         X_batch = [split.array for split in batch]
         lens_batch = [X_split.shape[0] for X_split in X_batch]
         offsets_batch = [split.split_offset for split in batch]
 
         X_padded = model.ops.pad(X_batch)
-        Y_padded, backprop = inner((X_padded, model.ops.asarray1i(lens_batch)), is_train)
+        Y_padded, backprop = inner(
+            (X_padded, model.ops.asarray1i(lens_batch)), is_train
+        )
         backprops.append(backprop)
         Y_batch = unpad_matrix(Y_padded, lens_batch)
 
@@ -202,21 +210,15 @@ def with_padded_max_items_forward(
     def backprop(dY):
         nonlocal backprops
 
-        # TODO: dY is a 1D array of the concatenation of all matrixes for
-        # all splits/docs in document order. reconstruct splits array. Then
-        # go from there. Something like this. Lens still needs to be a copy,
-        # since we mutate it above...
         dY_splits = []
         for split_len in lens:
-            dY_splits.append(dY[:split_len*split_len].reshape(split_len, split_len))
-            dY = dY[split_len*split_len:]
+            dY_splits.append(dY[: split_len * split_len].reshape(split_len, split_len))
+            dY = dY[split_len * split_len :]
 
         assert dY.size == 0
 
         dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
-        for idx, batch in enumerate(minibatch_by_padded_size(
-            splits, max_items
-        )):
+        for idx, batch in enumerate(minibatch_by_padded_size(splits, max_items)):
             dY_batch = [dY_splits[split.split_offset] for split in batch]
             dY_padded = pad_matrix(model.ops, dY_batch)
             dX_padded, L = backprops[idx](dY_padded)
@@ -224,8 +226,9 @@ def with_padded_max_items_forward(
 
             for split, dX_split in zip(batch, dX):
                 length = dX_split.shape[0]
-                dX_docs[split.doc_id][split.doc_offset: split.doc_offset + length] = dX_split
-
+                dX_docs[split.doc_id][
+                    split.doc_offset : split.doc_offset + length
+                ] = dX_split
 
         return dX_docs, lens
 
@@ -244,9 +247,8 @@ def unpad_matrix(padded: Floats3d, lengths: List[int]) -> List[Floats2d]:
         output.append(padded[i, :length, :length])
     return cast(List[Floats2d], output)
 
-def pad_matrix(  # noqa: F811
-    ops: Ops, seqs: List[Floats2d], round_to=1
-) -> Floats3d:
+
+def pad_matrix(ops: Ops, seqs: List[Floats2d], round_to=1) -> Floats3d:
     """Perform padding on a list of arrays so that they each have the same
     length, by taking the maximum dimension across each axis. This only
     works on non-empty sequences with the same `ndim` and `dtype`.
@@ -271,7 +273,7 @@ def pad_matrix(  # noqa: F811
     output = ops.alloc3f(*final_shape)
     for i, arr in enumerate(seqs):
         # It's difficult to convince this that the dtypes will match.
-        output[i, : arr.shape[0], :arr.shape[1]] = arr  # type: ignore[assignment, call-overload]
+        output[i, : arr.shape[0], : arr.shape[1]] = arr  # type: ignore[assignment, call-overload]
     return output
 
 
