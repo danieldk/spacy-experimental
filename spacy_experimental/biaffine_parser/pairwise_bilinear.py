@@ -161,6 +161,67 @@ def with_padded_max_items_init(model: Model, X=None, Y=None) -> None:
     model.layers[0].initialize(Y=Y)
 
 
+@dataclass
+class Split:
+    doc_id: int
+    doc_offset: int
+    split_offset: int
+    array: Floats2d
+
+    def __len__(self):
+        return self.array.shape[0]
+
+
+def minibatch_by_length(ops: Ops, inner: Model, X: List[Floats2d], splits: List[Split], max_items: int, is_train: bool):
+    # Sort by split length
+    splits_sorted = sorted(splits, key=lambda i: i.array.shape[0])
+
+    backprops = []
+    Y: List[Optional[Floats2d]] = [None] * len(splits)
+    for batch in minibatch_by_padded_size(splits_sorted, max_items):
+        X_batch = [split.array for split in batch]
+        lens_batch = [X_split.shape[0] for X_split in X_batch]
+        offsets_batch = [split.split_offset for split in batch]
+
+        Y_batch, backprop = pad_sequence_unpad_matrix(ops, inner, X_batch, lens_batch, is_train)
+        backprops.append(backprop)
+
+        # Place in outputs.
+        for split_offset, Y_split in zip(offsets_batch, Y_batch):
+            Y[split_offset] = Y_split.reshape((-1,))
+
+    def backprop(dY):
+        dX_docs = [ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
+        for idx, batch in enumerate(minibatch_by_padded_size(splits_sorted, max_items)):
+            dY_batch = [dY[split.split_offset] for split in batch]
+            dX_batch = backprops[idx](dY_batch)
+
+            for split, dX_split in zip(batch, dX_batch):
+                length = dX_split.shape[0]
+                dX_docs[split.doc_id][
+                    split.doc_offset : split.doc_offset + length
+                ] = dX_split
+
+        return dX_docs
+
+    return Y, backprop
+
+def pad_sequence_unpad_matrix(ops, inner, X, lens, is_train):
+    X_padded = ops.pad(X)
+    Y_padded, backprop_inner = inner(
+        (X_padded, ops.asarray1i(lens)), is_train
+    )
+    Y = unpad_matrix(Y_padded, lens)
+
+    def backprop(dY):
+        dY_padded = pad_matrix(ops, dY)
+        dX_padded, L = backprop_inner(dY_padded)
+        dX = ops.unpad(dX_padded, L)
+        return dX
+
+    return Y, backprop
+
+
 def with_padded_max_items_forward(
     model: Model, X_lens: Tuple[List[Floats2d], List[List[int]]], is_train: bool
 ):
@@ -182,30 +243,9 @@ def with_padded_max_items_forward(
                 )
             )
 
-    # Sort by split length
-    splits.sort(key=lambda i: i.array.shape[0])
-
-    backprops = []
-    Y: List[Optional[Floats2d]] = [None] * len(splits)
-    for batch in minibatch_by_padded_size(splits, max_items):
-        X_batch = [split.array for split in batch]
-        lens_batch = [X_split.shape[0] for X_split in X_batch]
-        offsets_batch = [split.split_offset for split in batch]
-
-        X_padded = model.ops.pad(X_batch)
-        Y_padded, backprop = inner(
-            (X_padded, model.ops.asarray1i(lens_batch)), is_train
-        )
-        backprops.append(backprop)
-        Y_batch = unpad_matrix(Y_padded, lens_batch)
-
-        # Place in outputs.
-        for split_offset, Y_split in zip(offsets_batch, Y_batch):
-            Y[split_offset] = Y_split.reshape((-1,))
+    Y, backprop_minibatch = minibatch_by_length(model.ops, inner, X, splits, max_items, is_train)
 
     def backprop(dY):
-        nonlocal backprops
-
         dY_splits = []
         for split_len in [len for doc_lens in lens for len in doc_lens]:
             dY_splits.append(dY[: split_len * split_len].reshape(split_len, split_len))
@@ -213,20 +253,7 @@ def with_padded_max_items_forward(
 
         assert dY.size == 0
 
-        dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
-        for idx, batch in enumerate(minibatch_by_padded_size(splits, max_items)):
-            dY_batch = [dY_splits[split.split_offset] for split in batch]
-            dY_padded = pad_matrix(model.ops, dY_batch)
-            dX_padded, L = backprops[idx](dY_padded)
-            dX = model.ops.unpad(dX_padded, L)
-
-            for split, dX_split in zip(batch, dX):
-                length = dX_split.shape[0]
-                dX_docs[split.doc_id][
-                    split.doc_offset : split.doc_offset + length
-                ] = dX_split
-
-        return dX_docs, lens
+        return backprop_minibatch(dY_splits), lens
 
     return model.ops.flatten(Y), backprop
 
@@ -272,13 +299,3 @@ def pad_matrix(ops: Ops, seqs: List[Floats2d], round_to=1) -> Floats3d:
         output[i, : arr.shape[0], : arr.shape[1]] = arr  # type: ignore[assignment, call-overload]
     return output
 
-
-@dataclass
-class Split:
-    doc_id: int
-    doc_offset: int
-    split_offset: int
-    array: Floats2d
-
-    def __len__(self):
-        return self.array.shape[0]
