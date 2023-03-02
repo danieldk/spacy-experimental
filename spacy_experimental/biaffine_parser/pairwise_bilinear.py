@@ -196,18 +196,13 @@ def minibatch_by_length(
             Y[split_offset] = Y_split.reshape((-1,))
 
     def backprop(dY):
-        dX_docs = [ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
+        dX = []
+        dX = [None] * len(splits)
         for idx, batch in enumerate(minibatch_by_padded_size(splits_sorted, max_items)):
             dY_batch = [dY[split.split_offset] for split in batch]
-            dX_batch = backprops[idx](dY_batch)
-
-            for split, dX_split in zip(batch, dX_batch):
-                length = dX_split.shape[0]
-                dX_docs[split.doc_id][
-                    split.doc_offset : split.doc_offset + length
-                ] = dX_split
-
-        return dX_docs
+            for split, dX_split in zip(batch, backprops[idx](dY_batch)):
+                dX[split.split_offset] = dX_split
+        return dX
 
     return Y, backprop
 
@@ -282,7 +277,16 @@ def with_padded_max_items_forward(
 
         assert dY.size == 0
 
-        return backprop_minibatch(dY_splits), lens
+        dX_splits = backprop_minibatch(dY_splits)
+
+        dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
+        for split, dX_split in zip(splits, dX_splits):
+            length = dX_split.shape[0]
+            dX_docs[split.doc_id][
+                split.doc_offset : split.doc_offset + length
+            ] = dX_split
+
+        return dX_docs, lens
 
     return model.ops.flatten(Y), backprop
 
