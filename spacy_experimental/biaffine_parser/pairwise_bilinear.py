@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, cast
+from cupy._creation.from_data import numpy
 
 from spacy import registry
 from spacy.tokens.doc import Doc
@@ -8,6 +9,8 @@ from thinc.api import Model, Ops, chain, get_width, list2array, to_numpy, torch2
 from thinc.api import with_getitem, xp2torch
 from thinc.shims.pytorch_grad_scaler import PyTorchGradScaler
 from thinc.types import ArgsKwargs, Floats2d, Floats3d, Floats4d, Ints1d
+
+from ._util import lens2offsets
 
 # Ensure that the spacy-experimental package can register entry points without
 # Torch installed.
@@ -159,32 +162,25 @@ def with_padded_max_items_init(model: Model, X=None, Y=None) -> None:
 
 
 def with_padded_max_items_forward(
-    model: Model, X_lens: Tuple[List[Floats2d], Ints1d], is_train: bool
+    model: Model, X_lens: Tuple[List[Floats2d], List[List[int]]], is_train: bool
 ):
     inner = model.layers[0]
     max_items: int = model.attrs["max_items"]
 
     X, lens = X_lens
-    lens = to_numpy(lens)
 
     splits = []
-    split_offset = 0
-    for doc_id, X_doc in enumerate(X):
-        doc_offset = 0
-        doc_len = X_doc.shape[0]
-        while doc_offset < doc_len:
-            split_len = int(lens[split_offset])
+    for doc_id, (X_doc, lens_docs) in enumerate(zip(X, lens)):
+        split_offsets = lens2offsets(lens_docs)
+        for split_offset, split_len in zip(split_offsets, lens_docs):
             splits.append(
                 Split(
                     doc_id=doc_id,
-                    doc_offset=doc_offset,
-                    split_offset=split_offset,
-                    array=X_doc[doc_offset : doc_offset + split_len],
+                    doc_offset=split_offset,
+                    split_offset=len(splits),
+                    array=X_doc[split_offset : split_offset + split_len],
                 )
             )
-            doc_offset += split_len
-            split_offset += 1
-        assert doc_offset == doc_len
 
     # Sort by split length
     splits.sort(key=lambda i: i.array.shape[0])
@@ -211,7 +207,7 @@ def with_padded_max_items_forward(
         nonlocal backprops
 
         dY_splits = []
-        for split_len in lens:
+        for split_len in [len for doc_lens in lens for len in doc_lens]:
             dY_splits.append(dY[: split_len * split_len].reshape(split_len, split_len))
             dY = dY[split_len * split_len :]
 

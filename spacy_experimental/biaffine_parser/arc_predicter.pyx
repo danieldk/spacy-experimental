@@ -20,6 +20,7 @@ from thinc.api import to_numpy
 from thinc.types import Floats2d, Ints1d, Tuple
 
 from .mst import mst_decode
+from ._util import lens2offsets
 
 
 default_model_config = """
@@ -85,8 +86,6 @@ class ArcPredicter(TrainablePipe):
     def get_loss(self, examples: Iterable[Example], scores, lengths) -> Tuple[float, Floats2d]:
         validate_examples(examples, "ArcPredicter.get_loss")
 
-        lengths = to_numpy(lengths)
-
         def loss_func(guesses, target, mask):
             d_scores = guesses - target
             d_scores *= mask
@@ -100,23 +99,23 @@ class ArcPredicter(TrainablePipe):
         mask = np.zeros(scores.shape, dtype=scores.dtype)
 
         offset = 0
-        for eg in examples:
+        for eg, doc_lens in zip(examples, lengths):
             aligned_heads, _ = eg.get_aligned_parse(projectivize=False)
             sent_start = 0
-            while sent_start != len(eg):
-                for i in range(lengths[0]):
-                    gold_head = aligned_heads[sent_start + i]
+            split_offsets = lens2offsets(doc_lens)
+            for split_offset, split_len in zip(split_offsets, doc_lens):
+                for i in range(split_len):
+                    gold_head = aligned_heads[split_offset + i]
                     if gold_head is not None:
                         # We only use the loss for token for which the correct head
                         # lies within the sentence boundaries.
-                        if sent_start <= gold_head < sent_start + lengths[0]:
-                            gold_head_idx = gold_head - sent_start
+                        if split_offset <= gold_head < split_offset + split_len:
+                            gold_head_idx = gold_head - split_offset
                             target[offset + gold_head_idx] = 1.0
-                            mask[offset:offset+lengths[0]] = 1
-                    offset += lengths[0]
+                            mask[offset:offset+split_len] = 1
+                    offset += split_len
 
-                sent_start += lengths[0]
-                lengths = lengths[1:]
+                sent_start += split_len
 
         assert offset == target.shape[0]
 
@@ -137,7 +136,7 @@ class ArcPredicter(TrainablePipe):
             doc_sample.append(example.predicted)
 
         # For initialization, we don't need correct sentence boundaries.
-        lengths_sample = self.model.ops.asarray1i([len(doc) for doc in doc_sample])
+        lengths_sample = [[len(doc)] for doc in doc_sample]
         self.model.initialize(X=(doc_sample, lengths_sample))
 
         # Store the input dimensionality. nI and nO are not stored explicitly
@@ -172,27 +171,21 @@ class ArcPredicter(TrainablePipe):
 
         scores = self.model.predict((docs, lengths))
 
-        lengths = to_numpy(lengths)
         scores = to_numpy(scores)
 
         heads = []
-        for doc in docs:
-            split_offset = 0
+        for doc, doc_lens in zip(docs, lengths):
             doc_heads = []
-            while split_offset != len(doc):
-                split_len = lengths[0]
+            for split_len in doc_lens:
                 split_scores = scores[:split_len*split_len].reshape(split_len, split_len)
                 split_heads = mst_decode(split_scores)
                 split_heads = [head - i for (i, head) in enumerate(split_heads)]
                 doc_heads.extend(split_heads)
 
-                split_offset += lengths[0]
                 scores = scores[split_len*split_len:]
-                lengths = lengths[1:]
 
             heads.append(doc_heads)
 
-        assert len(lengths) == 0
         assert len(scores) == 0
 
         return heads
@@ -231,7 +224,7 @@ class ArcPredicter(TrainablePipe):
             lens = split_lazily(docs, ops=self.model.ops, max_length=self.max_length, senter=self.senter, is_train=True)
         else:
             lens = sents2lens(docs, ops=self.model.ops)
-        if lens.sum() == 0:
+        if sum([sum(doc_lens) for doc_lens in lens]) == 0:
             return losses
 
         scores, backprop_scores = self.model.begin_update((docs, lens))
@@ -317,35 +310,38 @@ class ArcPredicter(TrainablePipe):
 
         self.model.initialize()
 
-def sents2lens(docs: List[Doc], *, ops: Ops) -> Ints1d:
+def sents2lens(docs: List[Doc], *, ops: Ops) -> List[List[int]]:
     """Get the lengths of sentences."""
     lens = []
     for doc in docs:
+        doc_lens = []
         for sent in doc.sents:
-            lens.append(sent.end - sent.start)
+            doc_lens.append(sent.end - sent.start)
+        lens.append(doc_lens)
+    return lens
 
-    return ops.asarray1i(lens)
-
-def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: SentenceRecognizer, is_train: bool) -> Ints1d:
+def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: SentenceRecognizer, is_train: bool) -> List[List[int]]:
     lens = []
     for doc in docs:
         activations = doc.activations.get(senter.name, None)
         if activations is None:
             raise ValueError("Greedy splitting requires senter with `store_activations` enabled.")
         scores = activations['probabilities']
-        split_recursive(scores[:,1], ops, max_length, lens)
+        lens.append(split_recursive(scores[:,1], ops, max_length))
 
-    assert sum(lens) == sum([len(doc) for doc in docs])
+    assert sum([sum(split_lens) for split_lens in lens]) == sum([len(doc) for doc in docs])
 
-    return ops.asarray1i(lens)
+    return lens
 
-def split_recursive(scores: Floats2d, ops: Ops, max_length: int, lengths: List[int]):
+def split_recursive(scores: Floats2d, ops: Ops, max_length: int) -> List[int]:
+    lens = []
     q = deque([scores])
     while q:
         scores = q.popleft()
         if len(scores) < max_length:
-            lengths.append(len(scores))
+            lens.append(len(scores))
         else:
             start = ops.xp.argmax(scores[1:]) + 1
             q.appendleft(scores[start:])
             q.appendleft(scores[:start])
+    return lens
