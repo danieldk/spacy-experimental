@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Generic, List, Optional, Sized, Tuple, TypeVar, cast
+from typing import Callable, Generic, List, Optional, Sized, Tuple, TypeVar, cast
 from cupy._creation.from_data import numpy
 
 from spacy import registry
@@ -8,7 +8,7 @@ from spacy.training.batchers import minibatch_by_padded_size
 from thinc.api import Model, Ops, chain, get_width, list2array, to_numpy, torch2xp
 from thinc.api import with_getitem, xp2torch
 from thinc.shims.pytorch_grad_scaler import PyTorchGradScaler
-from thinc.types import ArgsKwargs, Floats2d, Floats3d, Floats4d, Ints1d
+from thinc.types import ArgsKwargs, Floats1d, Floats2d, Floats3d, Floats4d, Ints1d
 
 from ._util import lens2offsets
 
@@ -21,6 +21,11 @@ try:
     )
 except ImportError:
     PyTorchPairwiseBilinearModel = None
+
+
+InT = TypeVar("InT")
+OutT = TypeVar("OutT")
+SizedT = TypeVar("SizedT", bound=Sized)
 
 
 def build_pairwise_bilinear(
@@ -61,7 +66,7 @@ def build_pairwise_bilinear(
         with_getitem(0, tok2vec),
         with_splits(
             with_minibatch_by_length(
-                with_pad_sequence_unpad_bilinear(pairwise_bilinear), max_items=max_items
+                with_pad_seq_unpad_bilinear(pairwise_bilinear), max_items=max_items
             )
         ),
     )
@@ -117,7 +122,7 @@ def convert_inputs(
     Xt = xp2torch(X, requires_grad=is_train)
     Lt = xp2torch(L)
 
-    def convert_from_torch_backward(d_inputs: ArgsKwargs) -> Tuple[Floats3d, Ints1d]:
+    def convert_from_torch_backward(d_inputs: ArgsKwargs) -> Floats3d:
         dX = cast(Floats3d, torch2xp(d_inputs.args[0]))
         return dX
 
@@ -146,9 +151,6 @@ def convert_outputs(model, inputs_outputs, is_train):
     return Y, convert_for_torch_backward
 
 
-SizedT = TypeVar("SizedT", bound=Sized)
-
-
 @dataclass
 class ItemIndex(Generic[SizedT]):
     value: SizedT
@@ -158,7 +160,9 @@ class ItemIndex(Generic[SizedT]):
         return len(self.value)
 
 
-def with_minibatch_by_length(inner: Model, *, max_items=4096):
+def with_minibatch_by_length(
+    inner: Model[List[SizedT], List[OutT]], *, max_items=4096
+) -> Model[List[SizedT], List[OutT]]:
     return Model(
         "with_minibatch_by_length",
         with_minibatch_by_length_forward,
@@ -168,16 +172,18 @@ def with_minibatch_by_length(inner: Model, *, max_items=4096):
     )
 
 
-def with_minibatch_by_length_init(model: Model, X=None, Y=None) -> None:
+def with_minibatch_by_length_init(
+    model: Model[List[InT], List[OutT]], X: Optional[InT] = None, Y=None
+) -> None:
     # TODO: pass through X
     model.layers[0].initialize(Y=Y)
 
 
 def with_minibatch_by_length_forward(
-    model: Model,
-    X: List[SizedT],
+    model: Model[List[SizedT], List[OutT]],
+    X: List[Floats2d],
     is_train: bool,
-):
+) -> Tuple[List[OutT], Callable[[List[OutT]], List[Floats2d]]]:
     inner = model.layers[0]
     max_items = model.attrs["max_items"]
 
@@ -193,8 +199,8 @@ def with_minibatch_by_length_forward(
         X_batch = [split.value for split in batch]
         lens_batch = [X_split.shape[0] for X_split in X_batch]
 
-        Y_batch, backprop = inner((X_batch, lens_batch), is_train)
-        backprops.append(backprop)
+        Y_batch, backprop_batch = inner((X_batch, lens_batch), is_train)
+        backprops.append(backprop_batch)
 
         # Place in outputs.
         offsets_batch = [split.idx for split in batch]
@@ -213,7 +219,62 @@ def with_minibatch_by_length_forward(
     return Y, backprop
 
 
-def with_pad_sequence_unpad_bilinear(inner: Model[List[Floats2d], List[Floats2d]]):
+def with_splits(
+    inner: Model[List[Floats2d], List[Floats2d]]
+) -> Model[Tuple[List[Floats2d], List[List[int]]], Floats1d]:
+    return Model(
+        "with_splits",
+        with_splits_forward,
+        init=with_splits_init,
+        layers=[inner],
+    )
+
+
+def with_splits_init(model: Model, X=None, Y=None) -> None:
+    # TODO: pass through X
+    model.layers[0].initialize(Y=Y)
+
+
+def with_splits_forward(
+    model: Model[Tuple[List[Floats2d], List[List[int]]], Floats1d],
+    X_lens: Tuple[List[Floats2d], List[List[int]]],
+    is_train: bool,
+) -> Floats1d:
+    inner = model.layers[0]
+
+    X, lens = X_lens
+
+    splits = []
+    split_locs = []
+    for doc_id, (X_doc, lens_docs) in enumerate(zip(X, lens)):
+        split_offsets = lens2offsets(lens_docs)
+        for split_offset, split_len in zip(split_offsets, lens_docs):
+            splits.append(X_doc[split_offset : split_offset + split_len])
+            split_locs.append((doc_id, split_offset))
+
+    Y, backprop_minibatch = inner(splits, is_train)
+
+    def backprop(dY):
+        dY_splits = []
+        for split_len in [len for doc_lens in lens for len in doc_lens]:
+            dY_splits.append(dY[: split_len * split_len].reshape(split_len, split_len))
+            dY = dY[split_len * split_len :]
+
+        assert dY.size == 0
+
+        dX_splits = backprop_minibatch(dY_splits)
+
+        dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
+        for (doc_id, doc_offset), dX_split in zip(split_locs, dX_splits):
+            length = dX_split.shape[0]
+            dX_docs[doc_id][doc_offset : doc_offset + length] = dX_split
+
+        return dX_docs, lens
+
+    return model.ops.flatten(Y), backprop
+
+
+def with_pad_seq_unpad_bilinear(inner: Model[Tuple[Floats2d, Ints1d], Floats2d]):
     """This layer is similar to with_padded, however it unpads
     correctly for layers that go from sequences to matrices."""
     return Model(
@@ -248,57 +309,6 @@ def with_pad_seq_unpad_bilinear_forward(model: Model, X_lens, is_train):
         return dX
 
     return Y, backprop
-
-
-def with_splits(inner: Model) -> Model:
-    return Model(
-        "with_splits",
-        with_splits_forward,
-        init=with_splits_init,
-        layers=[inner],
-    )
-
-
-def with_splits_init(model: Model, X=None, Y=None) -> None:
-    # TODO: pass through X
-    model.layers[0].initialize(Y=Y)
-
-
-def with_splits_forward(
-    model: Model, X_lens: Tuple[List[Floats2d], List[List[int]]], is_train: bool
-):
-    inner = model.layers[0]
-
-    X, lens = X_lens
-
-    splits = []
-    split_locs = []
-    for doc_id, (X_doc, lens_docs) in enumerate(zip(X, lens)):
-        split_offsets = lens2offsets(lens_docs)
-        for split_offset, split_len in zip(split_offsets, lens_docs):
-            splits.append(X_doc[split_offset : split_offset + split_len])
-            split_locs.append((doc_id, split_offset))
-
-    Y, backprop_minibatch = inner(splits, is_train)
-
-    def backprop(dY):
-        dY_splits = []
-        for split_len in [len for doc_lens in lens for len in doc_lens]:
-            dY_splits.append(dY[: split_len * split_len].reshape(split_len, split_len))
-            dY = dY[split_len * split_len :]
-
-        assert dY.size == 0
-
-        dX_splits = backprop_minibatch(dY_splits)
-
-        dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
-        for (doc_id, doc_offset), dX_split in zip(split_locs, dX_splits):
-            length = dX_split.shape[0]
-            dX_docs[doc_id][doc_offset : doc_offset + length] = dX_split
-
-        return dX_docs, lens
-
-    return model.ops.flatten(Y), backprop
 
 
 def unpad_matrix(padded: Floats3d, lengths: List[int]) -> List[Floats2d]:
