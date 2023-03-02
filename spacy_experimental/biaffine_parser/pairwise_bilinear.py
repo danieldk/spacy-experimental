@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, cast
+from typing import Generic, List, Optional, Sized, Tuple, TypeVar, cast
 from cupy._creation.from_data import numpy
 
 from spacy import registry
@@ -159,49 +159,51 @@ def with_padded_max_items_init(model: Model, X=None, Y=None) -> None:
     model.layers[0].initialize(Y=Y)
 
 
+SizedT = TypeVar("SizedT", bound=Sized)
+
+
 @dataclass
-class Split:
-    doc_id: int
-    doc_offset: int
-    split_offset: int
-    array: Floats2d
+class ItemIndex(Generic[SizedT]):
+    value: SizedT
+    idx: int
 
     def __len__(self):
-        return self.array.shape[0]
+        return len(self.value)
 
 
 def minibatch_by_length(
-    ops: Ops,
     inner: Model,
-    X: List[Floats2d],
-    splits: List[Split],
+    X: List[SizedT],
     max_items: int,
     is_train: bool,
 ):
-    # Sort by split length
-    splits_sorted = sorted(splits, key=lambda i: i.array.shape[0])
+    # Enumerate to keep track of the original order.
+    splits_sorted = sorted(
+        (ItemIndex(idx=idx, value=split) for idx, split in enumerate(X)),
+        key=lambda i: len(i),
+    )
 
     backprops = []
-    Y: List[Optional[Floats2d]] = [None] * len(splits)
+    Y: List[Optional[Floats2d]] = [None] * len(X)
     for batch in minibatch_by_padded_size(splits_sorted, max_items):
-        X_batch = [split.array for split in batch]
+        X_batch = [split.value for split in batch]
         lens_batch = [X_split.shape[0] for X_split in X_batch]
-        offsets_batch = [split.split_offset for split in batch]
 
         Y_batch, backprop = inner((X_batch, lens_batch), is_train)
         backprops.append(backprop)
 
         # Place in outputs.
+        offsets_batch = [split.idx for split in batch]
         for split_offset, Y_split in zip(offsets_batch, Y_batch):
             Y[split_offset] = Y_split.reshape((-1,))
 
     def backprop(dY):
         dX = []
-        dX = [None] * len(splits)
+        dX = [None] * len(X)
         for idx, batch in enumerate(minibatch_by_padded_size(splits_sorted, max_items)):
-            dY_batch = [dY[split.split_offset] for split in batch]
+            dY_batch = [dY[split.idx] for split in batch]
             for split, dX_split in zip(batch, backprops[idx](dY_batch)):
-                dX[split.split_offset] = dX_split
+                dX[split.idx] = dX_split
         return dX
 
     return Y, backprop
@@ -253,21 +255,14 @@ def with_padded_max_items_forward(
     X, lens = X_lens
 
     splits = []
+    split_locs = []
     for doc_id, (X_doc, lens_docs) in enumerate(zip(X, lens)):
         split_offsets = lens2offsets(lens_docs)
         for split_offset, split_len in zip(split_offsets, lens_docs):
-            splits.append(
-                Split(
-                    doc_id=doc_id,
-                    doc_offset=split_offset,
-                    split_offset=len(splits),
-                    array=X_doc[split_offset : split_offset + split_len],
-                )
-            )
+            splits.append(X_doc[split_offset : split_offset + split_len])
+            split_locs.append((doc_id, split_offset))
 
-    Y, backprop_minibatch = minibatch_by_length(
-        model.ops, inner, X, splits, max_items, is_train
-    )
+    Y, backprop_minibatch = minibatch_by_length(inner, splits, max_items, is_train)
 
     def backprop(dY):
         dY_splits = []
@@ -280,11 +275,9 @@ def with_padded_max_items_forward(
         dX_splits = backprop_minibatch(dY_splits)
 
         dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
-        for split, dX_split in zip(splits, dX_splits):
+        for (doc_id, doc_offset), dX_split in zip(split_locs, dX_splits):
             length = dX_split.shape[0]
-            dX_docs[split.doc_id][
-                split.doc_offset : split.doc_offset + length
-            ] = dX_split
+            dX_docs[doc_id][doc_offset : doc_offset + length] = dX_split
 
         return dX_docs, lens
 
