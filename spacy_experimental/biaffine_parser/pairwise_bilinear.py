@@ -59,8 +59,10 @@ def build_pairwise_bilinear(
 
     model = chain(
         with_getitem(0, tok2vec),
-        with_padded_max_items(
-            with_pad_sequence_unpad_bilinear(pairwise_bilinear), max_items
+        with_splits(
+            with_minibatch_by_length(
+                with_pad_sequence_unpad_bilinear(pairwise_bilinear), max_items=max_items
+            )
         ),
     )
     model.set_ref("pairwise_bilinear", pairwise_bilinear)
@@ -144,21 +146,6 @@ def convert_outputs(model, inputs_outputs, is_train):
     return Y, convert_for_torch_backward
 
 
-def with_padded_max_items(inner: Model, max_items: int) -> Model:
-    return Model(
-        "with_padded_max_items",
-        with_padded_max_items_forward,
-        init=with_padded_max_items_init,
-        attrs={"max_items": max_items},
-        layers=[inner],
-    )
-
-
-def with_padded_max_items_init(model: Model, X=None, Y=None) -> None:
-    # TODO: pass through X
-    model.layers[0].initialize(Y=Y)
-
-
 SizedT = TypeVar("SizedT", bound=Sized)
 
 
@@ -171,12 +158,29 @@ class ItemIndex(Generic[SizedT]):
         return len(self.value)
 
 
-def minibatch_by_length(
-    inner: Model,
+def with_minibatch_by_length(inner: Model, *, max_items=4096):
+    return Model(
+        "with_minibatch_by_length",
+        with_minibatch_by_length_forward,
+        init=with_minibatch_by_length_init,
+        attrs={"max_items": max_items},
+        layers=[inner],
+    )
+
+
+def with_minibatch_by_length_init(model: Model, X=None, Y=None) -> None:
+    # TODO: pass through X
+    model.layers[0].initialize(Y=Y)
+
+
+def with_minibatch_by_length_forward(
+    model: Model,
     X: List[SizedT],
-    max_items: int,
     is_train: bool,
 ):
+    inner = model.layers[0]
+    max_items = model.attrs["max_items"]
+
     # Enumerate to keep track of the original order.
     splits_sorted = sorted(
         (ItemIndex(idx=idx, value=split) for idx, split in enumerate(X)),
@@ -246,11 +250,24 @@ def with_pad_seq_unpad_bilinear_forward(model: Model, X_lens, is_train):
     return Y, backprop
 
 
-def with_padded_max_items_forward(
+def with_splits(inner: Model) -> Model:
+    return Model(
+        "with_splits",
+        with_splits_forward,
+        init=with_splits_init,
+        layers=[inner],
+    )
+
+
+def with_splits_init(model: Model, X=None, Y=None) -> None:
+    # TODO: pass through X
+    model.layers[0].initialize(Y=Y)
+
+
+def with_splits_forward(
     model: Model, X_lens: Tuple[List[Floats2d], List[List[int]]], is_train: bool
 ):
     inner = model.layers[0]
-    max_items: int = model.attrs["max_items"]
 
     X, lens = X_lens
 
@@ -262,7 +279,7 @@ def with_padded_max_items_forward(
             splits.append(X_doc[split_offset : split_offset + split_len])
             split_locs.append((doc_id, split_offset))
 
-    Y, backprop_minibatch = minibatch_by_length(inner, splits, max_items, is_train)
+    Y, backprop_minibatch = inner(splits, is_train)
 
     def backprop(dY):
         dY_splits = []
