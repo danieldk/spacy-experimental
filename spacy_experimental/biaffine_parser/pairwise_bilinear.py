@@ -57,13 +57,11 @@ def build_pairwise_bilinear(
         },
     )
 
-    model: Model[Tuple[List[Doc], Ints1d], Floats2d] = chain(
-        cast(
-            Model[Tuple[List[Doc], Ints1d], Tuple[List[Floats2d], Ints1d]],
-            with_getitem(0, tok2vec),
+    model = chain(
+        with_getitem(0, tok2vec),
+        with_padded_max_items(
+            with_pad_sequence_unpad_bilinear(pairwise_bilinear), max_items
         ),
-        ## TODO: do not hardcode max items
-        with_padded_max_items(pairwise_bilinear, max_items),
     )
     model.set_ref("pairwise_bilinear", pairwise_bilinear)
 
@@ -119,7 +117,7 @@ def convert_inputs(
 
     def convert_from_torch_backward(d_inputs: ArgsKwargs) -> Tuple[Floats3d, Ints1d]:
         dX = cast(Floats3d, torch2xp(d_inputs.args[0]))
-        return dX, L
+        return dX
 
     output = ArgsKwargs(args=(Xt, Lt), kwargs={})
 
@@ -172,7 +170,14 @@ class Split:
         return self.array.shape[0]
 
 
-def minibatch_by_length(ops: Ops, inner: Model, X: List[Floats2d], splits: List[Split], max_items: int, is_train: bool):
+def minibatch_by_length(
+    ops: Ops,
+    inner: Model,
+    X: List[Floats2d],
+    splits: List[Split],
+    max_items: int,
+    is_train: bool,
+):
     # Sort by split length
     splits_sorted = sorted(splits, key=lambda i: i.array.shape[0])
 
@@ -183,7 +188,7 @@ def minibatch_by_length(ops: Ops, inner: Model, X: List[Floats2d], splits: List[
         lens_batch = [X_split.shape[0] for X_split in X_batch]
         offsets_batch = [split.split_offset for split in batch]
 
-        Y_batch, backprop = pad_sequence_unpad_matrix(ops, inner, X_batch, lens_batch, is_train)
+        Y_batch, backprop = inner((X_batch, lens_batch), is_train)
         backprops.append(backprop)
 
         # Place in outputs.
@@ -206,17 +211,39 @@ def minibatch_by_length(ops: Ops, inner: Model, X: List[Floats2d], splits: List[
 
     return Y, backprop
 
-def pad_sequence_unpad_matrix(ops, inner, X, lens, is_train):
-    X_padded = ops.pad(X)
-    Y_padded, backprop_inner = inner(
-        (X_padded, ops.asarray1i(lens)), is_train
+
+def with_pad_sequence_unpad_bilinear(inner: Model[List[Floats2d], List[Floats2d]]):
+    """This layer is similar to with_padded, however it unpads
+    correctly for layers that go from sequences to matrices."""
+    return Model(
+        "with_pad_seq_unpad_bilinear",
+        with_pad_seq_unpad_bilinear_forward,
+        init=with_pad_seq_unpad_bilinear_init,
+        layers=[inner],
     )
+
+
+def with_pad_seq_unpad_bilinear_init(model: Model, X=None, Y=None):
+    inner = model.layers[0]
+    if X is not None:
+        X_seqs, lens = X
+        inner.initialize((model.ops.pad(X_seqs), lens), Y)
+    else:
+        inner.initialize(X, Y)
+
+
+def with_pad_seq_unpad_bilinear_forward(model: Model, X_lens, is_train):
+    inner = model.layers[0]
+    X, lens = X_lens
+
+    X_padded = model.ops.pad(X)
+    Y_padded, backprop_inner = inner((X_padded, model.ops.asarray1i(lens)), is_train)
     Y = unpad_matrix(Y_padded, lens)
 
     def backprop(dY):
-        dY_padded = pad_matrix(ops, dY)
-        dX_padded, L = backprop_inner(dY_padded)
-        dX = ops.unpad(dX_padded, L)
+        dY_padded = pad_matrix(model.ops, dY)
+        dX_padded = backprop_inner(dY_padded)
+        dX = model.ops.unpad(dX_padded, lens)
         return dX
 
     return Y, backprop
@@ -243,7 +270,9 @@ def with_padded_max_items_forward(
                 )
             )
 
-    Y, backprop_minibatch = minibatch_by_length(model.ops, inner, X, splits, max_items, is_train)
+    Y, backprop_minibatch = minibatch_by_length(
+        model.ops, inner, X, splits, max_items, is_train
+    )
 
     def backprop(dY):
         dY_splits = []
@@ -298,4 +327,3 @@ def pad_matrix(ops: Ops, seqs: List[Floats2d], round_to=1) -> Floats3d:
         # It's difficult to convince this that the dtypes will match.
         output[i, : arr.shape[0], : arr.shape[1]] = arr  # type: ignore[assignment, call-overload]
     return output
-
