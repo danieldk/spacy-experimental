@@ -1,9 +1,7 @@
-from typing import Callable, Generic, List, Optional, Sized, Tuple, TypeVar, Union
+from typing import Callable, List, Optional, Tuple, TypeVar, Union
 from typing import cast
-from dataclasses import dataclass
 from spacy import registry
 from spacy.tokens.doc import Doc
-from spacy.training.batchers import minibatch_by_padded_size
 from thinc.api import Model, Ops, chain, get_width, torch2xp
 from thinc.api import with_getitem, xp2torch
 from thinc.shims.pytorch_grad_scaler import PyTorchGradScaler
@@ -17,6 +15,7 @@ from thinc.types import (
 )
 
 from ._util import lens2offsets
+from .with_minibatch_by_padded_length import with_minibatch_by_padded_length
 
 # Ensure that the spacy-experimental package can register entry points without
 # Torch installed.
@@ -31,7 +30,6 @@ except ImportError:
 
 InT = TypeVar("InT")
 OutT = TypeVar("OutT")
-SizedT = TypeVar("SizedT", bound=Sized)
 
 
 def build_pairwise_bilinear(
@@ -74,7 +72,7 @@ def build_pairwise_bilinear(
             with_getitem(0, tok2vec),
         ),
         with_splits(
-            with_minibatch_by_length(
+            with_minibatch_by_padded_length(
                 with_pad_seq_unpad_bilinear(pairwise_bilinear), max_items=max_items
             )
         ),
@@ -159,76 +157,6 @@ def convert_outputs(
     return Y, convert_for_torch_backward
 
 
-@dataclass
-class ItemIndex(Generic[SizedT]):
-    value: SizedT
-    idx: int
-
-    def __len__(self):
-        return len(self.value)
-
-
-def with_minibatch_by_length(
-    inner: Model[Tuple[List[SizedT], List[int]], List[OutT]], *, max_items=4096
-) -> Model[List[SizedT], List[OutT]]:
-    return Model(
-        "with_minibatch_by_length",
-        with_minibatch_by_length_forward,
-        init=with_minibatch_by_length_init,
-        attrs={"max_items": max_items},
-        layers=[inner],
-    )
-
-
-def with_minibatch_by_length_init(
-    model: Model[List[InT], List[OutT]], X: Optional[InT] = None, Y=None
-) -> None:
-    # TODO: pass through X
-    model.layers[0].initialize(Y=Y)
-
-
-def with_minibatch_by_length_forward(
-    model: Model[List[SizedT], List[OutT]],
-    X: List[SizedT],
-    is_train: bool,
-) -> Tuple[List[OutT], Callable[[List[OutT]], List[SizedT]]]:
-    inner: Model[Tuple[List[SizedT], List[int]], List[OutT]] = model.layers[0]
-    max_items: int = model.attrs["max_items"]
-
-    # Enumerate to keep track of the original order.
-    splits_sorted = sorted(
-        (ItemIndex(idx=idx, value=split) for idx, split in enumerate(X)),
-        key=lambda i: len(i),
-    )
-
-    backprops = []
-    Y: List[Optional[OutT]] = [None] * len(X)
-    for batch in minibatch_by_padded_size(splits_sorted, max_items):
-        X_batch = [split.value for split in batch]
-        lens_batch = [len(X_split) for X_split in X_batch]
-
-        Y_batch, backprop_batch = inner((X_batch, lens_batch), is_train)
-        backprops.append(backprop_batch)
-
-        # Place in outputs.
-        offsets_batch = [split.idx for split in batch]
-        for split_offset, Y_split in zip(offsets_batch, Y_batch):
-            Y[split_offset] = Y_split
-
-    assert not any(v is None for v in Y)
-    Y = cast(List[OutT], Y)
-
-    def backprop(dY: List[OutT]) -> List[SizedT]:
-        dX: List[Optional[SizedT]] = [None] * len(X)
-        for idx, batch in enumerate(minibatch_by_padded_size(splits_sorted, max_items)):
-            dY_batch = [dY[split.idx] for split in batch]
-            for split, dX_split in zip(batch, backprops[idx](dY_batch)):
-                dX[split.idx] = dX_split
-        return cast(List[SizedT], dX)
-
-    return Y, backprop
-
-
 def with_splits(
     inner: Model[List[Floats2d], List[Floats2d]]
 ) -> Model[Tuple[List[Floats2d], List[Ints1d]], Floats1d]:
@@ -288,7 +216,7 @@ def with_splits_forward(
 
 def with_pad_seq_unpad_bilinear(
     inner: Model[Tuple[Floats2d, Ints1d], Floats2d]
-) -> Model[Tuple[List[Floats2d], List[int]], List[Floats2d]]:
+) -> Model[List[Floats2d], List[Floats2d]]:
     """This layer is similar to with_padded, however it unpads
     correctly for layers that go from sequences to matrices."""
     return Model(
@@ -309,20 +237,19 @@ def with_pad_seq_unpad_bilinear_init(model: Model, X=None, Y=None):
 
 
 def with_pad_seq_unpad_bilinear_forward(
-    model: Model[Tuple[List[Floats2d], List[int]], List[Floats2d]],
-    X_lens: Tuple[List[Floats2d], List[int]],
+    model: Model[List[Floats2d], List[Floats2d]],
+    X: List[Floats2d],
     is_train: bool,
-) -> Tuple[
-    List[Floats2d], Callable[[List[Floats2d]], Tuple[List[Floats2d], List[int]]]
-]:
+) -> Tuple[List[Floats2d], Callable[[List[Floats2d]], List[Floats2d]]]:
     inner = model.layers[0]
-    X, lens = X_lens
+
+    lens = [len(Xs) for Xs in X]
 
     X_padded = model.ops.pad(X)
     Y_padded, backprop_inner = inner((X_padded, model.ops.asarray1i(lens)), is_train)
     Y = unpad_matrix(Y_padded, lens)
 
-    def backprop(dY: List[Floats2d]) -> Tuple[List[Floats2d], List[int]]:
+    def backprop(dY: List[Floats2d]) -> List[Floats2d]:
         dY_padded = pad_matrix(model.ops, dY)
         dX_padded = backprop_inner(dY_padded)
         dX = model.ops.unpad(dX_padded, lens)
