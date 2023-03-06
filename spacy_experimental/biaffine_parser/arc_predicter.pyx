@@ -1,9 +1,9 @@
 # cython: infer_types=True, profile=True, binding=True
 
+from typing import Callable, Dict, Iterable, List, Optional
 from itertools import islice
 from collections import deque
 import numpy as np
-from typing import Callable, Dict, Iterable, List, Optional
 import spacy
 from spacy import Language, Vocab
 from spacy.errors import Errors
@@ -15,12 +15,15 @@ from spacy.tokens.doc cimport Doc
 from spacy.training import Example, validate_get_examples, validate_examples
 from spacy.util import minibatch
 import srsly
-from thinc.api import Config, Model, Ops, Optimizer
+from thinc.api import Config, Model, NumpyOps, Ops, Optimizer
 from thinc.api import to_numpy
 from thinc.types import Floats2d, Ints1d, Tuple
 
 from .mst import mst_decode
 from ._util import lens2offsets
+
+
+NUMPY_OPS = NumpyOps()
 
 
 default_model_config = """
@@ -136,7 +139,7 @@ class ArcPredicter(TrainablePipe):
             doc_sample.append(example.predicted)
 
         # For initialization, we don't need correct sentence boundaries.
-        lengths_sample = [[len(doc)] for doc in doc_sample]
+        lengths_sample = [NUMPY_OPS.asarray1i([len(doc)]) for doc in doc_sample]
         self.model.initialize(X=(doc_sample, lengths_sample))
 
         # Store the input dimensionality. nI and nO are not stored explicitly
@@ -310,24 +313,25 @@ class ArcPredicter(TrainablePipe):
 
         self.model.initialize()
 
-def sents2lens(docs: List[Doc], *, ops: Ops) -> List[List[int]]:
+def sents2lens(docs: List[Doc], *, ops: Ops) -> List[Ints1d]:
     """Get the lengths of sentences."""
     lens = []
     for doc in docs:
         doc_lens = []
         for sent in doc.sents:
             doc_lens.append(sent.end - sent.start)
-        lens.append(doc_lens)
+        lens.append(NUMPY_OPS.asarray1i(doc_lens))
     return lens
 
-def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: SentenceRecognizer, is_train: bool) -> List[List[int]]:
+def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: SentenceRecognizer, is_train: bool) -> List[Ints1d]:
     lens = []
     for doc in docs:
         activations = doc.activations.get(senter.name, None)
         if activations is None:
             raise ValueError("Greedy splitting requires senter with `store_activations` enabled.")
         scores = activations['probabilities']
-        lens.append(split_recursive(scores[:,1], ops, max_length))
+        doc_lens = split_recursive(scores[:,1], ops, max_length)
+        lens.append(NUMPY_OPS.asarray1i(doc_lens))
 
     assert sum([sum(split_lens) for split_lens in lens]) == sum([len(doc) for doc in docs])
 
