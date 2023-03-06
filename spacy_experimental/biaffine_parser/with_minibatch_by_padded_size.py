@@ -17,21 +17,21 @@ class ItemIndex(Generic[SizedInT]):
         return len(self.value)
 
 
-def with_minibatch_by_padded_length(
-    inner: Model[List[SizedInT], List[OutT]], *, max_items=4096
+def with_minibatch_by_padded_size(
+    inner: Model[List[SizedInT], List[OutT]], size: int, buffer: int = 256
 ) -> Model[List[SizedInT], List[OutT]]:
     """Batch the inputs sorted by length and with a maximum number of
     padded batch items."""
     return Model(
-        "with_minibatch_by_length",
-        with_minibatch_by_length_forward,
-        init=with_minibatch_by_length_init,
-        attrs={"max_items": max_items},
+        "with_minibatch_by_padded_size",
+        with_minibatch_by_padded_size_forward,
+        init=with_minibatch_by_padded_size_init,
+        attrs={"buffer": buffer, "size": size},
         layers=[inner],
     )
 
 
-def with_minibatch_by_length_init(
+def with_minibatch_by_padded_size_init(
     model: Model[List[SizedInT], List[OutT]], X: Optional[SizedInT] = None, Y=None
 ) -> None:
     # Pass X through as-is. Downstream models don't need the batching
@@ -39,23 +39,26 @@ def with_minibatch_by_length_init(
     model.layers[0].initialize(X=X, Y=Y)
 
 
-def with_minibatch_by_length_forward(
+def with_minibatch_by_padded_size_forward(
     model: Model[List[SizedInT], List[OutT]],
     X: List[SizedInT],
     is_train: bool,
 ) -> Tuple[List[OutT], Callable[[List[OutT]], List[SizedInT]]]:
     inner: Model[List[SizedInT], List[OutT]] = model.layers[0]
-    max_items: int = model.attrs["max_items"]
+    buffer: int = model.attrs["buffer"]
+    size: int = model.attrs["size"]
 
-    # Enumerate to keep track of the original order.
-    splits_sorted = sorted(
-        (ItemIndex(idx=idx, value=split) for idx, split in enumerate(X)),
-        key=lambda i: len(i),
+    batched = list(
+        minibatch_by_padded_size(
+            [ItemIndex(idx=idx, value=item) for idx, item in enumerate(X)],
+            size,
+            buffer=buffer,
+        )
     )
 
     backprops = []
     Y: List[Optional[OutT]] = [None] * len(X)
-    for batch in minibatch_by_padded_size(splits_sorted, max_items):
+    for batch in batched:
         X_batch = [split.value for split in batch]
         Y_batch, backprop_batch = inner(X_batch, is_train)
         backprops.append(backprop_batch)
@@ -69,7 +72,7 @@ def with_minibatch_by_length_forward(
 
     def backprop(dY: List[OutT]) -> List[SizedInT]:
         dX: List[Optional[SizedInT]] = [None] * len(X)
-        for idx, batch in enumerate(minibatch_by_padded_size(splits_sorted, max_items)):
+        for idx, batch in enumerate(batched):
             dY_batch = [dY[split.idx] for split in batch]
             for split, dX_split in zip(batch, backprops[idx](dY_batch)):
                 dX[split.idx] = dX_split

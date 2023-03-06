@@ -15,7 +15,7 @@ from thinc.types import (
 )
 
 from ._util import lens2offsets
-from .with_minibatch_by_padded_length import with_minibatch_by_padded_length
+from .with_minibatch_by_padded_size import with_minibatch_by_padded_size
 
 # Ensure that the spacy-experimental package can register entry points without
 # Torch installed.
@@ -72,8 +72,8 @@ def build_pairwise_bilinear(
             with_getitem(0, tok2vec),
         ),
         with_splits(
-            with_minibatch_by_padded_length(
-                with_pad_seq_unpad_bilinear(pairwise_bilinear), max_items=max_items
+            with_minibatch_by_padded_size(
+                with_pad_seq_unpad_bilinear(pairwise_bilinear), size=max_items
             )
         ),
     )
