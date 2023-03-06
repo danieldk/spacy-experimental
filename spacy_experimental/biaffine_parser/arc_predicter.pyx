@@ -17,7 +17,7 @@ from spacy.util import minibatch
 import srsly
 from thinc.api import Config, Model, NumpyOps, Ops, Optimizer
 from thinc.api import to_numpy
-from thinc.types import Floats2d, Ints1d, Tuple
+from thinc.types import Floats1d, Floats2d, Ints1d, Tuple
 
 from .mst import mst_decode
 from ._util import lens2offsets
@@ -96,7 +96,7 @@ class ArcPredicter(TrainablePipe):
             return d_scores, loss
 
         # We want to compute all the losses at once to avoid too many kernel runs.
-        #scores_flat = self.model.ops.flatten(scores)
+        scores = self.model.ops.flatten([split_scores.reshape(-1) for split_scores in scores])
 
         target = np.zeros(scores.shape, dtype=scores.dtype)
         mask = np.zeros(scores.shape, dtype=scores.dtype)
@@ -127,7 +127,9 @@ class ArcPredicter(TrainablePipe):
 
         d_scores, loss = loss_func(scores, target, mask)
 
-        return float(loss), d_scores
+
+        split_lens = [split_len for doc_lens in lengths for split_len in doc_lens]
+        return float(loss), unflatten_matrix(d_scores, split_lens)
 
     def initialize(
         self, get_examples: Callable[[], Iterable[Example]], *, nlp: Language = None
@@ -349,3 +351,11 @@ def split_recursive(scores: Floats2d, ops: Ops, max_length: int) -> List[int]:
             q.appendleft(scores[start:])
             q.appendleft(scores[:start])
     return lens
+
+def unflatten_matrix(scores: Floats1d, lens: List[Ints1d]) -> List[Floats2d]:
+    d_scores_matrix = []
+    for len in lens:
+        d_scores_matrix.append(scores[:len * len].reshape((len, len)))
+        scores = scores[len * len:]
+    assert scores.size == 0
+    return d_scores_matrix

@@ -194,22 +194,13 @@ def with_splits_forward(
     Y, backprop_inner = inner(splits, is_train)
 
     def backprop(dY: Floats1d) -> Tuple[List[Floats2d], List[Ints1d]]:
-        dY_splits = []
-        for split_len in [len for doc_lens in lens for len in doc_lens]:
-            dY_splits.append(
-                dY[: split_len * split_len].reshape((split_len, split_len))
-            )
-            dY = dY[split_len * split_len :]
-
-        assert dY.size == 0
-
-        dX_splits = backprop_inner(dY_splits)
+        dX = backprop_inner(dY)
 
         dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
-        for (doc_id, doc_offset), dX_split in zip(split_locs, dX_splits):
+        for (doc_id, doc_offset), dX_split in zip(split_locs, dX):
             length = dX_split.shape[0]
             dX_docs[doc_id][doc_offset : doc_offset + length] = dX_split
 
         return dX_docs, lens
 
-    return model.ops.flatten([Ys.reshape(-1) for Ys in Y]), backprop
+    return Y, backprop
