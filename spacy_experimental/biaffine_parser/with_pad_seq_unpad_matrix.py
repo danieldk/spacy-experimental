@@ -22,8 +22,8 @@ def with_pad_seq_unpad_matrix(inner: Model[InnerInT, InnerOutT]) -> Model[InT, O
 def with_pad_seq_unpad_matrix_init(model: Model[InT, OutT], X=None, Y=None):
     inner = model.layers[0]
     if X is not None:
-        X_seqs, lens = X
-        inner.initialize((model.ops.pad(X_seqs), lens), Y)
+        lens = [len(Xs) for Xs in X]
+        inner.initialize((model.ops.pad(X), model.ops.asarray1i(lens)), Y)
     else:
         inner.initialize(X, Y)
 

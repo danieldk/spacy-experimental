@@ -7,16 +7,16 @@ from thinc.api import with_getitem, xp2torch
 from thinc.shims.pytorch_grad_scaler import PyTorchGradScaler
 from thinc.types import (
     ArgsKwargs,
-    Floats1d,
     Floats2d,
     Floats3d,
     Floats4d,
     Ints1d,
 )
 
-from ._util import lens2offsets
+
 from .with_minibatch_by_padded_size import with_minibatch_by_padded_size
 from .with_pad_seq_unpad_matrix import with_pad_seq_unpad_matrix
+from .with_splits import with_splits
 
 # Ensure that the spacy-experimental package can register entry points without
 # Torch installed.
@@ -42,7 +42,7 @@ def build_pairwise_bilinear(
     max_items: int = 4096,
     mixed_precision: bool = False,
     grad_scaler: Optional[PyTorchGradScaler] = None
-) -> Model[Tuple[List[Doc], List[Ints1d]], Floats1d]:
+) -> Model[Tuple[List[Doc], List[Ints1d]], List[Floats2d]]:
     if PyTorchPairwiseBilinearModel is None:
         raise ImportError(
             "PairwiseBiLinear layer requires PyTorch: pip install thinc[torch]"
@@ -156,51 +156,3 @@ def convert_outputs(
     Y = cast(Union[Floats3d, Floats4d], torch2xp(Y_t))
 
     return Y, convert_for_torch_backward
-
-
-def with_splits(
-    inner: Model[List[Floats2d], List[Floats2d]]
-) -> Model[Tuple[List[Floats2d], List[Ints1d]], Floats1d]:
-    return Model(
-        "with_splits",
-        with_splits_forward,
-        init=with_splits_init,
-        layers=[inner],
-    )
-
-
-def with_splits_init(model: Model, X=None, Y=None) -> None:
-    # TODO: pass through X
-    model.layers[0].initialize(Y=Y)
-
-
-def with_splits_forward(
-    model: Model[Tuple[List[Floats2d], List[Ints1d]], Floats1d],
-    X_lens: Tuple[List[Floats2d], List[Ints1d]],
-    is_train: bool,
-) -> Tuple[Floats1d, Callable[[Floats1d], Tuple[List[Floats2d], List[Ints1d]]]]:
-    inner = model.layers[0]
-
-    X, lens = X_lens
-
-    splits = []
-    split_locs = []
-    for doc_id, (X_doc, lens_docs) in enumerate(zip(X, lens)):
-        split_offsets = lens2offsets(lens_docs)
-        for split_offset, split_len in zip(split_offsets, lens_docs):
-            splits.append(X_doc[split_offset : split_offset + split_len])
-            split_locs.append((doc_id, split_offset))
-
-    Y, backprop_inner = inner(splits, is_train)
-
-    def backprop(dY: Floats1d) -> Tuple[List[Floats2d], List[Ints1d]]:
-        dX = backprop_inner(dY)
-
-        dX_docs = [model.ops.alloc2f(*X_doc.shape, zeros=False) for X_doc in X]
-        for (doc_id, doc_offset), dX_split in zip(split_locs, dX):
-            length = dX_split.shape[0]
-            dX_docs[doc_id][doc_offset : doc_offset + length] = dX_split
-
-        return dX_docs, lens
-
-    return Y, backprop

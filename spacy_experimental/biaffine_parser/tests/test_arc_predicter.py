@@ -10,11 +10,23 @@ pytest.importorskip("torch")
 
 TRAIN_DATA = [
     (
-        "She likes green eggs",
+        "She likes green eggs. She is eating them today.",
         {
-            "heads": [1, 1, 3, 1],
-            "deps": ["nsubj", "ROOT", "amod", "dobj"],
-            "sent_starts": [1, 0, 0, 0],
+            "heads": [1, 1, 3, 1, 1, 7, 7, 7, 7, 7, 7],
+            "deps": [
+                "nsubj",
+                "ROOT",
+                "amod",
+                "dobj",
+                "punct",
+                "nsubj",
+                "aux",
+                "ROOT",
+                "dobj",
+                "npadvmod",
+                "punct",
+            ],
+            "sent_starts": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
         },
     ),
     (
@@ -80,7 +92,9 @@ def test_incomplete_data():
 
     for i in range(150):
         losses = {}
-        nlp.update(train_examples, sgd=optimizer, losses=losses, annotates=["sentencizer"])
+        nlp.update(
+            train_examples, sgd=optimizer, losses=losses, annotates=["sentencizer"]
+        )
     assert losses["experimental_arc_predicter"] < 0.00001
 
     test_text = "She likes green eggs"
@@ -103,7 +117,9 @@ def test_overfitting_IO():
 
     for i in range(150):
         losses = {}
-        nlp.update(train_examples, sgd=optimizer, losses=losses, annotates=["sentencizer"])
+        nlp.update(
+            train_examples, sgd=optimizer, losses=losses, annotates=["sentencizer"]
+        )
     assert losses["experimental_arc_predicter"] < 0.00001
 
     test_text = "She likes green eggs"

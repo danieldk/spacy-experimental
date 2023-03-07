@@ -20,7 +20,7 @@ from thinc.api import to_numpy
 from thinc.types import Floats1d, Floats2d, Ints1d, Tuple
 
 from .mst import mst_decode
-from ._util import lens2offsets
+from ._util import lengths2offsets
 
 
 NUMPY_OPS = NumpyOps()
@@ -105,7 +105,7 @@ class ArcPredicter(TrainablePipe):
         for eg, doc_lens in zip(examples, lengths):
             aligned_heads, _ = eg.get_aligned_parse(projectivize=False)
             sent_start = 0
-            split_offsets = lens2offsets(doc_lens)
+            split_offsets = lengths2offsets(doc_lens)
             for split_offset, split_len in zip(split_offsets, doc_lens):
                 for i in range(split_len):
                     gold_head = aligned_heads[split_offset + i]
@@ -128,8 +128,8 @@ class ArcPredicter(TrainablePipe):
         d_scores, loss = loss_func(scores, target, mask)
 
 
-        split_lens = [split_len for doc_lens in lengths for split_len in doc_lens]
-        return float(loss), unflatten_matrix(d_scores, split_lens)
+        split_lengths = [split_length for doc_lens in lengths for split_length in doc_lens]
+        return float(loss), unflatten_matrix(d_scores, split_lengths)
 
     def initialize(
         self, get_examples: Callable[[], Iterable[Example]], *, nlp: Language = None
@@ -176,6 +176,7 @@ class ArcPredicter(TrainablePipe):
 
         scores = self.model.predict((docs, lengths))
 
+        scores = self.model.ops.flatten([split_scores.reshape(-1) for split_scores in scores])
         scores = to_numpy(scores)
 
         heads = []
@@ -352,10 +353,10 @@ def split_recursive(scores: Floats2d, ops: Ops, max_length: int) -> List[int]:
             q.appendleft(scores[:start])
     return lens
 
-def unflatten_matrix(scores: Floats1d, lens: List[Ints1d]) -> List[Floats2d]:
+def unflatten_matrix(scores: Floats1d, lengths: List[Ints1d]) -> List[Floats2d]:
     d_scores_matrix = []
-    for len in lens:
-        d_scores_matrix.append(scores[:len * len].reshape((len, len)))
-        scores = scores[len * len:]
+    for length in lengths:
+        d_scores_matrix.append(scores[:length * length].reshape((length, length)))
+        scores = scores[length * length:]
     assert scores.size == 0
     return d_scores_matrix
