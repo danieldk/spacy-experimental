@@ -66,8 +66,8 @@ def _unflatten_inner_flatten_outer(
     for X_inner, lengths_inner in zip(X, lengths):
         split_offsets = lengths2offsets(lengths_inner)
         X_flat.extend(
-            X_inner[split_offset : split_offset + split_len]
-            for split_offset, split_len in zip(split_offsets, lengths_inner)
+            X_inner[split_offset : split_offset + split_length]
+            for split_offset, split_length in zip(split_offsets, lengths_inner)
         )
     return X_flat
 

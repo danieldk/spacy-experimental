@@ -22,8 +22,8 @@ def with_pad_seq_unpad_matrix(inner: Model[InnerInT, InnerOutT]) -> Model[InT, O
 def with_pad_seq_unpad_matrix_init(model: Model[InT, OutT], X=None, Y=None):
     inner = model.layers[0]
     if X is not None:
-        lens = [len(Xs) for Xs in X]
-        inner.initialize((model.ops.pad(X), model.ops.asarray1i(lens)), Y)
+        lengths = [len(Xs) for Xs in X]
+        inner.initialize((model.ops.pad(X), model.ops.asarray1i(lengths)), Y)
     else:
         inner.initialize(X, Y)
 
@@ -35,16 +35,16 @@ def with_pad_seq_unpad_matrix_forward(
 ) -> Tuple[OutT, Callable[[OutT], InT]]:
     inner = model.layers[0]
 
-    lens = [len(Xs) for Xs in X]
+    lengths = [len(Xs) for Xs in X]
 
     X_padded = model.ops.pad(X)
-    Y_padded, backprop_inner = inner((X_padded, model.ops.asarray1i(lens)), is_train)
-    Y = unpad_matrix(Y_padded, lens)
+    Y_padded, backprop_inner = inner((X_padded, model.ops.asarray1i(lengths)), is_train)
+    Y = unpad_matrix(Y_padded, lengths)
 
     def backprop(dY: List[Floats2d]) -> List[Floats2d]:
         dY_padded = pad_matrix(model.ops, dY)
         dX_padded = backprop_inner(dY_padded)
-        dX = model.ops.unpad(dX_padded, lens)
+        dX = model.ops.unpad(dX_padded, lengths)
         return cast(List[Floats2d], dX)
 
     return Y, backprop
