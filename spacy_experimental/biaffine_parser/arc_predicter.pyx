@@ -328,12 +328,13 @@ def sents2lens(docs: List[Doc], *, ops: Ops) -> List[Ints1d]:
 
 def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: SentenceRecognizer, is_train: bool) -> List[Ints1d]:
     lens = []
+    start_index = senter.labels.index("S")
     for doc in docs:
         activations = doc.activations.get(senter.name, None)
         if activations is None:
             raise ValueError("Greedy splitting requires senter with `store_activations` enabled.")
         scores = activations['probabilities']
-        doc_lens = split_recursive(scores[:,1], ops, max_length)
+        doc_lens = split_recursive(scores[:,start_index], ops, max_length)
         lens.append(NUMPY_OPS.asarray1i(doc_lens))
 
     assert sum([sum(split_lens) for split_lens in lens]) == sum([len(doc) for doc in docs])
@@ -345,7 +346,7 @@ def split_recursive(scores: Floats2d, ops: Ops, max_length: int) -> List[int]:
     q = deque([scores])
     while q:
         scores = q.popleft()
-        if len(scores) < max_length:
+        if len(scores) <= max_length:
             lens.append(len(scores))
         else:
             start = ops.xp.argmax(scores[1:]) + 1

@@ -29,6 +29,30 @@ except ImportError:
     PyTorchPairwiseBilinearModel = None
 
 
+# Model notes
+#
+# The Thinc part of the pairwire bilinear model used to be fairly simple: we
+# would collect the splits from all documents and then pad them. However, this
+# would run the parser out of GPU memory on very large docs. So instead, we do
+# the following:
+#
+# - Get all splits and flatten to a list of split representations.
+#   (with_splits)
+# - Batch the splits by their padded sizes. This ensures that memory
+#   use is constant when splits have a maximum size. This also permits
+#   some buffering, so that we get more equisized batches.
+#   (with_minibatch_by_padded_size)
+# - The splits in the batches are padded and passed to the Torch model.
+#   Since the outputs of the Torch model are matrices, we unpad taking
+#   this into account. (with_pad_seq_unpad_matrix)
+#
+# In contrast to most with_* layers, with_splits is not symmetric. It
+# takes at its inputrepresentations per document (List[Floats2d]), however
+# it outputs pairwise score matrices per split. The reason is that since
+# the dimensions of the score matrices differ per split, we cannot
+# concatenate them at a document level.
+
+
 InT = TypeVar("InT")
 OutT = TypeVar("OutT")
 
