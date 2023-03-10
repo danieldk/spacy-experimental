@@ -342,6 +342,7 @@ def split_lazily(docs: List[Doc], *, ops: Ops, max_length: int, senter: Sentence
     return lens
 
 def split_recursive(scores: Floats2d, ops: Ops, max_length: int) -> List[int]:
+    scores = to_numpy(scores)
     lens = []
     q = deque([scores])
     while q:
@@ -349,7 +350,7 @@ def split_recursive(scores: Floats2d, ops: Ops, max_length: int) -> List[int]:
         if len(scores) <= max_length:
             lens.append(len(scores))
         else:
-            start = ops.xp.argmax(scores[1:]) + 1
+            start = scores[1:].argmax() + 1
             q.appendleft(scores[start:])
             q.appendleft(scores[:start])
     return lens
